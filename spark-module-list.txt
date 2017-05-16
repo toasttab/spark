@@ -13,4 +13,3 @@ spark-sql
 spark-streaming
 spark-tags
 spark-unsafe
-spark-yarn
