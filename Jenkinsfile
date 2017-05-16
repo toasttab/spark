@@ -4,5 +4,4 @@ import spark
 
 spark {
   notify = false
-  deploy = true
 }
