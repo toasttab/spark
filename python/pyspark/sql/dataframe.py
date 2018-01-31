@@ -191,6 +191,23 @@ class DataFrame(object):
         """
         self._jdf.createGlobalTempView(name)
 
+    @since(2.2)
+    def createOrReplaceGlobalTempView(self, name):
+        """Creates or replaces a global temporary view using the given name.
+
+        The lifetime of this temporary view is tied to this Spark application.
+
+        >>> df.createOrReplaceGlobalTempView("people")
+        >>> df2 = df.filter(df.age > 3)
+        >>> df2.createOrReplaceGlobalTempView("people")
+        >>> df3 = spark.sql("select * from global_temp.people")
+        >>> sorted(df3.collect()) == sorted(df2.collect())
+        True
+        >>> spark.catalog.dropGlobalTempView("people")
+
+        """
+        self._jdf.createOrReplaceGlobalTempView(name)
+
     @property
     @since(1.4)
     def write(self):
@@ -209,7 +226,7 @@ class DataFrame(object):
         Interface for saving the content of the streaming :class:`DataFrame` out into external
         storage.
 
-        .. note:: Experimental.
+        .. note:: Evolving.
 
         :return: :class:`DataStreamWriter`
         """
@@ -285,7 +302,7 @@ class DataFrame(object):
         :func:`collect`) will throw an :class:`AnalysisException` when there is a streaming
         source present.
 
-        .. note:: Experimental
+        .. note:: Evolving
         """
         return self._jdf.isStreaming()
 
@@ -359,7 +376,7 @@ class DataFrame(object):
             latest record that has been processed in the form of an interval
             (e.g. "1 minute" or "5 hours").
 
-        .. note:: Experimental
+        .. note:: Evolving
 
         >>> sdf.select('name', sdf.time.cast('timestamp')).withWatermark('time', '10 minutes')
         DataFrame[name: string, time: timestamp]
@@ -1149,18 +1166,23 @@ class DataFrame(object):
 
     @since(2.0)
     def union(self, other):
-        """ Return a new :class:`DataFrame` containing union of rows in this
-        frame and another frame.
+        """ Return a new :class:`DataFrame` containing union of rows in this and another frame.
 
         This is equivalent to `UNION ALL` in SQL. To do a SQL-style set union
         (that does deduplication of elements), use this function followed by a distinct.
+
+        Also as standard in SQL, this function resolves columns by position (not by name).
         """
         return DataFrame(self._jdf.union(other._jdf), self.sql_ctx)
 
     @since(1.3)
     def unionAll(self, other):
-        """ Return a new :class:`DataFrame` containing union of rows in this
-        frame and another frame.
+        """ Return a new :class:`DataFrame` containing union of rows in this and another frame.
+
+        This is equivalent to `UNION ALL` in SQL. To do a SQL-style set union
+        (that does deduplication of elements), use this function followed by a distinct.
+
+        Also as standard in SQL, this function resolves columns by position (not by name).
 
         .. note:: Deprecated in 2.0, use union instead.
         """

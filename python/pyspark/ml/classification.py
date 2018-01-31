@@ -63,13 +63,14 @@ class JavaClassificationModel(JavaPredictionModel):
 @inherit_doc
 class LinearSVC(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol, HasMaxIter,
                 HasRegParam, HasTol, HasRawPredictionCol, HasFitIntercept, HasStandardization,
-                HasThreshold, HasWeightCol, HasAggregationDepth, JavaMLWritable, JavaMLReadable):
+                HasWeightCol, HasAggregationDepth, JavaMLWritable, JavaMLReadable):
     """
     .. note:: Experimental
 
     `Linear SVM Classifier <https://en.wikipedia.org/wiki/Support_vector_machine#Linear_SVM>`_
 
     This binary classifier optimizes the Hinge Loss using the OWLQN optimizer.
+    Only supports L2 regularization currently.
 
     >>> from pyspark.sql import Row
     >>> from pyspark.ml.linalg import Vectors
@@ -108,6 +109,12 @@ class LinearSVC(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol, Ha
     .. versionadded:: 2.2.0
     """
 
+    threshold = Param(Params._dummy(), "threshold",
+                      "The threshold in binary classification applied to the linear model"
+                      " prediction.  This threshold can be any real number, where Inf will make"
+                      " all predictions 0.0 and -Inf will make all predictions 1.0.",
+                      typeConverter=TypeConverters.toFloat)
+
     @keyword_only
     def __init__(self, featuresCol="features", labelCol="label", predictionCol="prediction",
                  maxIter=100, regParam=0.0, tol=1e-6, rawPredictionCol="rawPrediction",
@@ -145,6 +152,18 @@ class LinearSVC(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredictionCol, Ha
 
     def _create_model(self, java_model):
         return LinearSVCModel(java_model)
+
+    def setThreshold(self, value):
+        """
+        Sets the value of :py:attr:`threshold`.
+        """
+        return self._set(threshold=value)
+
+    def getThreshold(self):
+        """
+        Gets the value of threshold or its default value.
+        """
+        return self.getOrDefault(self.threshold)
 
 
 class LinearSVCModel(JavaModel, JavaClassificationModel, JavaMLWritable, JavaMLReadable):
@@ -349,13 +368,13 @@ class LogisticRegression(JavaEstimator, HasFeaturesCol, HasLabelCol, HasPredicti
 
     def _checkThresholdConsistency(self):
         if self.isSet(self.threshold) and self.isSet(self.thresholds):
-            ts = self.getParam(self.thresholds)
+            ts = self.getOrDefault(self.thresholds)
             if len(ts) != 2:
                 raise ValueError("Logistic Regression getThreshold only applies to" +
                                  " binary classification, but thresholds has length != 2." +
-                                 " thresholds: " + ",".join(ts))
+                                 " thresholds: {0}".format(str(ts)))
             t = 1.0/(1.0 + ts[0]/ts[1])
-            t2 = self.getParam(self.threshold)
+            t2 = self.getOrDefault(self.threshold)
             if abs(t2 - t) >= 1E-5:
                 raise ValueError("Logistic Regression getThreshold found inconsistent values for" +
                                  " threshold (%g) and thresholds (equivalent to %g)" % (t2, t))
@@ -1442,7 +1461,7 @@ class MultilayerPerceptronClassificationModel(JavaModel, JavaPredictionModel, Ja
         return self._call_java("weights")
 
 
-class OneVsRestParams(HasFeaturesCol, HasLabelCol, HasPredictionCol):
+class OneVsRestParams(HasFeaturesCol, HasLabelCol, HasWeightCol, HasPredictionCol):
     """
     Parameters for OneVsRest and OneVsRestModel.
     """
@@ -1512,10 +1531,10 @@ class OneVsRest(Estimator, OneVsRestParams, MLReadable, MLWritable):
 
     @keyword_only
     def __init__(self, featuresCol="features", labelCol="label", predictionCol="prediction",
-                 classifier=None):
+                 classifier=None, weightCol=None):
         """
         __init__(self, featuresCol="features", labelCol="label", predictionCol="prediction", \
-                 classifier=None)
+                 classifier=None, weightCol=None)
         """
         super(OneVsRest, self).__init__()
         kwargs = self._input_kwargs
@@ -1523,9 +1542,11 @@ class OneVsRest(Estimator, OneVsRestParams, MLReadable, MLWritable):
 
     @keyword_only
     @since("2.0.0")
-    def setParams(self, featuresCol=None, labelCol=None, predictionCol=None, classifier=None):
+    def setParams(self, featuresCol=None, labelCol=None, predictionCol=None,
+                  classifier=None, weightCol=None):
         """
-        setParams(self, featuresCol=None, labelCol=None, predictionCol=None, classifier=None):
+        setParams(self, featuresCol=None, labelCol=None, predictionCol=None, \
+                  classifier=None, weightCol=None):
         Sets params for OneVsRest.
         """
         kwargs = self._input_kwargs
@@ -1541,11 +1562,21 @@ class OneVsRest(Estimator, OneVsRestParams, MLReadable, MLWritable):
 
         numClasses = int(dataset.agg({labelCol: "max"}).head()["max("+labelCol+")"]) + 1
 
-        multiclassLabeled = dataset.select(labelCol, featuresCol)
+        weightCol = None
+        if (self.isDefined(self.weightCol) and self.getWeightCol()):
+            if isinstance(classifier, HasWeightCol):
+                weightCol = self.getWeightCol()
+            else:
+                warnings.warn("weightCol is ignored, "
+                              "as it is not supported by {} now.".format(classifier))
+
+        if weightCol:
+            multiclassLabeled = dataset.select(labelCol, featuresCol, weightCol)
+        else:
+            multiclassLabeled = dataset.select(labelCol, featuresCol)
 
         # persist if underlying dataset is not persistent.
-        handlePersistence = \
-            dataset.rdd.getStorageLevel() == StorageLevel(False, False, False, False)
+        handlePersistence = dataset.storageLevel == StorageLevel(False, False, False, False)
         if handlePersistence:
             multiclassLabeled.persist(StorageLevel.MEMORY_AND_DISK)
 
@@ -1557,6 +1588,8 @@ class OneVsRest(Estimator, OneVsRestParams, MLReadable, MLWritable):
             paramMap = dict([(classifier.labelCol, binaryLabelCol),
                             (classifier.featuresCol, featuresCol),
                             (classifier.predictionCol, predictionCol)])
+            if weightCol:
+                paramMap[classifier.weightCol] = weightCol
             return classifier.fit(trainingDataset, paramMap)
 
         # TODO: Parallel training for all classes.
@@ -1656,8 +1689,7 @@ class OneVsRestModel(Model, OneVsRestParams, MLReadable, MLWritable):
         newDataset = dataset.withColumn(accColName, initUDF(dataset[origCols[0]]))
 
         # persist if underlying dataset is not persistent.
-        handlePersistence = \
-            dataset.rdd.getStorageLevel() == StorageLevel(False, False, False, False)
+        handlePersistence = dataset.storageLevel == StorageLevel(False, False, False, False)
         if handlePersistence:
             newDataset.persist(StorageLevel.MEMORY_AND_DISK)
 

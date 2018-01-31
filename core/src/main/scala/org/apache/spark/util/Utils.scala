@@ -22,7 +22,7 @@ import java.lang.management.{LockInfo, ManagementFactory, MonitorInfo, ThreadInf
 import java.math.{MathContext, RoundingMode}
 import java.net._
 import java.nio.ByteBuffer
-import java.nio.channels.Channels
+import java.nio.channels.{Channels, FileChannel}
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 import java.util.{Locale, Properties, Random, UUID}
@@ -60,7 +60,6 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.serializer.{DeserializationStream, SerializationStream, SerializerInstance}
-import org.apache.spark.util.logging.RollingFileAppender
 
 /** CallSite represents a place in user code. It can have a short and a long form. */
 private[spark] case class CallSite(shortForm: String, longForm: String)
@@ -319,41 +318,22 @@ private[spark] object Utils extends Logging {
    * copying is disabled by default unless explicitly set transferToEnabled as true,
    * the parameter transferToEnabled should be configured by spark.file.transferTo = [true|false].
    */
-  def copyStream(in: InputStream,
-                 out: OutputStream,
-                 closeStreams: Boolean = false,
-                 transferToEnabled: Boolean = false): Long =
-  {
-    var count = 0L
+  def copyStream(
+      in: InputStream,
+      out: OutputStream,
+      closeStreams: Boolean = false,
+      transferToEnabled: Boolean = false): Long = {
     tryWithSafeFinally {
       if (in.isInstanceOf[FileInputStream] && out.isInstanceOf[FileOutputStream]
         && transferToEnabled) {
         // When both streams are File stream, use transferTo to improve copy performance.
         val inChannel = in.asInstanceOf[FileInputStream].getChannel()
         val outChannel = out.asInstanceOf[FileOutputStream].getChannel()
-        val initialPos = outChannel.position()
         val size = inChannel.size()
-
-        // In case transferTo method transferred less data than we have required.
-        while (count < size) {
-          count += inChannel.transferTo(count, size - count, outChannel)
-        }
-
-        // Check the position after transferTo loop to see if it is in the right position and
-        // give user information if not.
-        // Position will not be increased to the expected length after calling transferTo in
-        // kernel version 2.6.32, this issue can be seen in
-        // https://bugs.openjdk.java.net/browse/JDK-7052359
-        // This will lead to stream corruption issue when using sort-based shuffle (SPARK-3948).
-        val finalPos = outChannel.position()
-        assert(finalPos == initialPos + size,
-          s"""
-             |Current position $finalPos do not equal to expected position ${initialPos + size}
-             |after transferTo, please check your kernel version to see if it is 2.6.32,
-             |this is a kernel bug which will lead to unexpected behavior when using transferTo.
-             |You can set spark.file.transferTo = false to disable this NIO feature.
-           """.stripMargin)
+        copyFileStreamNIO(inChannel, outChannel, 0, size)
+        size
       } else {
+        var count = 0L
         val buf = new Array[Byte](8192)
         var n = 0
         while (n != -1) {
@@ -363,8 +343,8 @@ private[spark] object Utils extends Logging {
             count += n
           }
         }
+        count
       }
-      count
     } {
       if (closeStreams) {
         try {
@@ -374,6 +354,37 @@ private[spark] object Utils extends Logging {
         }
       }
     }
+  }
+
+  def copyFileStreamNIO(
+      input: FileChannel,
+      output: FileChannel,
+      startPosition: Long,
+      bytesToCopy: Long): Unit = {
+    val initialPos = output.position()
+    var count = 0L
+    // In case transferTo method transferred less data than we have required.
+    while (count < bytesToCopy) {
+      count += input.transferTo(count + startPosition, bytesToCopy - count, output)
+    }
+    assert(count == bytesToCopy,
+      s"request to copy $bytesToCopy bytes, but actually copied $count bytes.")
+
+    // Check the position after transferTo loop to see if it is in the right position and
+    // give user information if not.
+    // Position will not be increased to the expected length after calling transferTo in
+    // kernel version 2.6.32, this issue can be seen in
+    // https://bugs.openjdk.java.net/browse/JDK-7052359
+    // This will lead to stream corruption issue when using sort-based shuffle (SPARK-3948).
+    val finalPos = output.position()
+    val expectedPos = initialPos + bytesToCopy
+    assert(finalPos == expectedPos,
+      s"""
+         |Current position $finalPos do not equal to expected position $expectedPos
+         |after transferTo, please check your kernel version to see if it is 2.6.32,
+         |this is a kernel bug which will lead to unexpected behavior when using transferTo.
+         |You can set spark.file.transferTo = false to disable this NIO feature.
+           """.stripMargin)
   }
 
   /**
@@ -1334,14 +1345,10 @@ private[spark] object Utils extends Logging {
       try {
         finallyBlock
       } catch {
-        case t: Throwable =>
-          if (originalThrowable != null) {
-            originalThrowable.addSuppressed(t)
-            logWarning(s"Suppressing exception in finally: " + t.getMessage, t)
-            throw originalThrowable
-          } else {
-            throw t
-          }
+        case t: Throwable if (originalThrowable != null && originalThrowable != t) =>
+          originalThrowable.addSuppressed(t)
+          logWarning(s"Suppressing exception in finally: ${t.getMessage}", t)
+          throw originalThrowable
       }
     }
   }
@@ -1373,22 +1380,20 @@ private[spark] object Utils extends Logging {
           catchBlock
         } catch {
           case t: Throwable =>
-            originalThrowable.addSuppressed(t)
-            logWarning(s"Suppressing exception in catch: " + t.getMessage, t)
+            if (originalThrowable != t) {
+              originalThrowable.addSuppressed(t)
+              logWarning(s"Suppressing exception in catch: ${t.getMessage}", t)
+            }
         }
         throw originalThrowable
     } finally {
       try {
         finallyBlock
       } catch {
-        case t: Throwable =>
-          if (originalThrowable != null) {
-            originalThrowable.addSuppressed(t)
-            logWarning(s"Suppressing exception in finally: " + t.getMessage, t)
-            throw originalThrowable
-          } else {
-            throw t
-          }
+        case t: Throwable if (originalThrowable != null && originalThrowable != t) =>
+          originalThrowable.addSuppressed(t)
+          logWarning(s"Suppressing exception in finally: ${t.getMessage}", t)
+          throw originalThrowable
       }
     }
   }
@@ -2575,18 +2580,23 @@ private[spark] object Utils extends Logging {
   }
 
   /**
-   * In YARN mode this method returns a union of the jar files pointed by "spark.jars" and the
-   * "spark.yarn.dist.jars" properties, while in other modes it returns the jar files pointed by
-   * only the "spark.jars" property.
+   * Return the jar files pointed by the "spark.jars" property. Spark internally will distribute
+   * these jars through file server. In the YARN mode, it will return an empty list, since YARN
+   * has its own mechanism to distribute jars.
    */
-  def getUserJars(conf: SparkConf, isShell: Boolean = false): Seq[String] = {
+  def getUserJars(conf: SparkConf): Seq[String] = {
     val sparkJars = conf.getOption("spark.jars")
-    if (conf.get("spark.master") == "yarn" && isShell) {
-      val yarnJars = conf.getOption("spark.yarn.dist.jars")
-      unionFileLists(sparkJars, yarnJars).toSeq
-    } else {
-      sparkJars.map(_.split(",")).map(_.filter(_.nonEmpty)).toSeq.flatten
-    }
+    sparkJars.map(_.split(",")).map(_.filter(_.nonEmpty)).toSeq.flatten
+  }
+
+  /**
+   * Return the local jar files which will be added to REPL's classpath. These jar files are
+   * specified by --jars (spark.jars) or --packages, remote jars will be downloaded to local by
+   * SparkSubmit at first.
+   */
+  def getLocalUserJarsForShell(conf: SparkConf): Seq[String] = {
+    val localJars = conf.getOption("spark.repl.local.jars")
+    localJars.map(_.split(",")).map(_.filter(_.nonEmpty)).toSeq.flatten
   }
 
   private[spark] val REDACTION_REPLACEMENT_TEXT = "*********(redacted)"
@@ -2604,9 +2614,12 @@ private[spark] object Utils extends Logging {
    * Redact the sensitive information in the given string.
    */
   def redact(conf: SparkConf, text: String): String = {
-    if (text == null || text.isEmpty || !conf.contains(STRING_REDACTION_PATTERN)) return text
-    val regex = conf.get(STRING_REDACTION_PATTERN).get
-    regex.replaceAllIn(text, REDACTION_REPLACEMENT_TEXT)
+    if (text == null || text.isEmpty || conf == null || !conf.contains(STRING_REDACTION_PATTERN)) {
+      text
+    } else {
+      val regex = conf.get(STRING_REDACTION_PATTERN).get
+      regex.replaceAllIn(text, REDACTION_REPLACEMENT_TEXT)
+    }
   }
 
   private def redact(redactionPattern: Regex, kvs: Seq[(String, String)]): Seq[(String, String)] = {
