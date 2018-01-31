@@ -89,6 +89,10 @@ mockLinesComplexType <-
 complexTypeJsonPath <- tempfile(pattern = "sparkr-test", fileext = ".tmp")
 writeLines(mockLinesComplexType, complexTypeJsonPath)
 
+if (.Platform$OS.type == "windows") {
+  Sys.setenv(TZ = "GMT")
+}
+
 test_that("calling sparkRSQL.init returns existing SQL context", {
   sqlContext <- suppressWarnings(sparkRSQL.init(sc))
   expect_equal(suppressWarnings(sparkRSQL.init(sc)), sqlContext)
@@ -411,6 +415,12 @@ test_that("create DataFrame with different data types", {
                                 c("d", "string"), c("e", "date"), c("f", "timestamp")))
   expect_equal(count(df), 1)
   expect_equal(collect(df), data.frame(l, stringsAsFactors = FALSE))
+})
+
+test_that("SPARK-17902: collect() with stringsAsFactors enabled", {
+  df <- suppressWarnings(collect(createDataFrame(iris), stringsAsFactors = TRUE))
+  expect_equal(class(iris$Species), class(df$Species))
+  expect_equal(iris$Species, df$Species)
 })
 
 test_that("SPARK-17811: can create DataFrame containing NA as date and time", {
@@ -2551,6 +2561,11 @@ test_that("gapply() and gapplyCollect() on a DataFrame", {
 
   df1Collect <- gapplyCollect(df, list("a"), function(key, x) { x })
   expect_identical(df1Collect, expected)
+
+  # gapply on empty grouping columns.
+  df1 <- gapply(df, c(), function(key, x) { x }, schema(df))
+  actual <- collect(df1)
+  expect_identical(actual, expected)
 
   # Computes the sum of second column by grouping on the first and third columns
   # and checks if the sum is larger than 2
