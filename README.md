@@ -1,3 +1,10 @@
+# For internal toast usage if you are compiling locally
+
+use following command
+
+Apache Hadoop 2.7.X and later
+./build/mvn -Pyarn -Phadoop-2.7 -Dhadoop.version=VERSION -DskipTests clean package
+
 # Apache Spark
 
 Spark is a fast and general cluster computing system for Big Data. It provides
