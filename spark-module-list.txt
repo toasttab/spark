@@ -1,0 +1,15 @@
+spark-yarn
+spark-catalyst
+spark-core
+spark-graphx
+spark-launcher
+spark-mllib-local
+spark-mllib
+spark-network-common
+spark-network-shuffle
+spark-repl
+spark-sketch
+spark-sql
+spark-streaming
+spark-tags
+spark-unsafe
