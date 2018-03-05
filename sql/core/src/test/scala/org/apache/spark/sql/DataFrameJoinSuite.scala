@@ -21,6 +21,7 @@ import org.apache.spark.sql.catalyst.plans.{Inner, LeftOuter, RightOuter}
 import org.apache.spark.sql.catalyst.plans.logical.Join
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSQLContext
 
 class DataFrameJoinSuite extends QueryTest with SharedSQLContext {
@@ -263,5 +264,27 @@ class DataFrameJoinSuite extends QueryTest with SharedSQLContext {
     val c = Seq((3, 1)).toDF("a", "d")
     val ab = a.join(b, Seq("a"), "fullouter")
     checkAnswer(ab.join(c, "a"), Row(3, null, 4, 1) :: Nil)
+  }
+
+  test("SPARK-17685: WholeStageCodegenExec throws IndexOutOfBoundsException") {
+    val df = Seq((1, 1, "1"), (2, 2, "3")).toDF("int", "int2", "str")
+    val df2 = Seq((1, 1, "1"), (2, 3, "5")).toDF("int", "int2", "str")
+    val limit = 1310721
+    val innerJoin = df.limit(limit).join(df2.limit(limit), Seq("int", "int2"), "inner")
+      .agg(count($"int"))
+    checkAnswer(innerJoin, Row(1) :: Nil)
+  }
+
+  test("SPARK-23087: don't throw Analysis Exception in CheckCartesianProduct when join condition " +
+    "is false or null") {
+    withSQLConf(SQLConf.CROSS_JOINS_ENABLED.key -> "false") {
+      val df = spark.range(10)
+      val dfNull = spark.range(10).select(lit(null).as("b"))
+      df.join(dfNull, $"id" === $"b", "left").queryExecution.optimizedPlan
+
+      val dfOne = df.select(lit(1).as("a"))
+      val dfTwo = spark.range(10).select(lit(2).as("b"))
+      dfOne.join(dfTwo, $"a" === $"b", "left").queryExecution.optimizedPlan
+    }
   }
 }

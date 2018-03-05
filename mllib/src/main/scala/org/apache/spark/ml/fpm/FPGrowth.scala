@@ -32,6 +32,7 @@ import org.apache.spark.mllib.fpm.FPGrowth.FreqItemset
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
+import org.apache.spark.storage.StorageLevel
 
 /**
  * Common params for FPGrowth and FPGrowthModel
@@ -158,18 +159,30 @@ class FPGrowth @Since("2.2.0") (
   }
 
   private def genericFit[T: ClassTag](dataset: Dataset[_]): FPGrowthModel = {
+    val handlePersistence = dataset.storageLevel == StorageLevel.NONE
+
     val data = dataset.select($(itemsCol))
-    val items = data.where(col($(itemsCol)).isNotNull).rdd.map(r => r.getSeq[T](0).toArray)
+    val items = data.where(col($(itemsCol)).isNotNull).rdd.map(r => r.getSeq[Any](0).toArray)
     val mllibFP = new MLlibFPGrowth().setMinSupport($(minSupport))
     if (isSet(numPartitions)) {
       mllibFP.setNumPartitions($(numPartitions))
     }
+
+    if (handlePersistence) {
+      items.persist(StorageLevel.MEMORY_AND_DISK)
+    }
+
     val parentModel = mllibFP.run(items)
     val rows = parentModel.freqItemsets.map(f => Row(f.items, f.freq))
     val schema = StructType(Seq(
       StructField("items", dataset.schema($(itemsCol)).dataType, nullable = false),
       StructField("freq", LongType, nullable = false)))
     val frequentItems = dataset.sparkSession.createDataFrame(rows, schema)
+
+    if (handlePersistence) {
+      items.unpersist()
+    }
+
     copyValues(new FPGrowthModel(uid, frequentItems)).setParent(this)
   }
 
@@ -200,7 +213,7 @@ object FPGrowth extends DefaultParamsReadable[FPGrowth] {
 @Experimental
 class FPGrowthModel private[ml] (
     @Since("2.2.0") override val uid: String,
-    @transient val freqItemsets: DataFrame)
+    @Since("2.2.0") @transient val freqItemsets: DataFrame)
   extends Model[FPGrowthModel] with FPGrowthParams with MLWritable {
 
   /** @group setParam */
@@ -269,12 +282,8 @@ class FPGrowthModel private[ml] (
     val predictUDF = udf((items: Seq[_]) => {
       if (items != null) {
         val itemset = items.toSet
-        brRules.value.flatMap(rule =>
-          if (items != null && rule._1.forall(item => itemset.contains(item))) {
-            rule._2.filter(item => !itemset.contains(item))
-          } else {
-            Seq.empty
-          }).distinct
+        brRules.value.filter(_._1.forall(itemset.contains))
+          .flatMap(_._2.filter(!itemset.contains(_))).distinct
       } else {
         Seq.empty
       }}, dt)
