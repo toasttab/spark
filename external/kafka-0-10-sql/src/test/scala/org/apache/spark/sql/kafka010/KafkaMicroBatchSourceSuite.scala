@@ -124,7 +124,7 @@ abstract class KafkaSourceTest extends StreamTest with SharedSQLContext {
         } ++ (query.get.lastExecution match {
           case null => Seq()
           case e => e.logical.collect {
-            case StreamingDataSourceV2Relation(_, reader: KafkaContinuousReader) => reader
+            case StreamingDataSourceV2Relation(_, _, _, reader: KafkaContinuousReader) => reader
           }
         })
       }.distinct
@@ -563,7 +563,7 @@ abstract class KafkaMicroBatchSourceSuiteBase extends KafkaSourceSuiteBase {
     )
   }
 
-  test("ensure stream-stream self-join generates only one offset in offset log") {
+  test("ensure stream-stream self-join generates only one offset in log and correct metrics") {
     val topic = newTopic()
     testUtils.createTopic(topic, partitions = 2)
     require(testUtils.getLatestOffsets(Set(topic)).size === 2)
@@ -587,7 +587,12 @@ abstract class KafkaMicroBatchSourceSuiteBase extends KafkaSourceSuiteBase {
       AddKafkaData(Set(topic), 1, 2),
       CheckAnswer((1, 1, 1), (2, 2, 2)),
       AddKafkaData(Set(topic), 6, 3),
-      CheckAnswer((1, 1, 1), (2, 2, 2), (3, 3, 3), (1, 6, 1), (1, 1, 6), (1, 6, 6))
+      CheckAnswer((1, 1, 1), (2, 2, 2), (3, 3, 3), (1, 6, 1), (1, 1, 6), (1, 6, 6)),
+      AssertOnQuery { q =>
+        assert(q.availableOffsets.iterator.size == 1)
+        assert(q.recentProgress.map(_.numInputRows).sum == 4)
+        true
+      }
     )
   }
 }

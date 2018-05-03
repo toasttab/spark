@@ -15,6 +15,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+import re
+import sys
+import inspect
 from py4j.protocol import Py4JJavaError
 
 __all__ = []
@@ -45,8 +49,41 @@ def _exception_message(excp):
     return str(excp)
 
 
+def _get_argspec(f):
+    """
+    Get argspec of a function. Supports both Python 2 and Python 3.
+    """
+    # `getargspec` is deprecated since python3.0 (incompatible with function annotations).
+    # See SPARK-23569.
+    if sys.version_info[0] < 3:
+        argspec = inspect.getargspec(f)
+    else:
+        argspec = inspect.getfullargspec(f)
+    return argspec
+
+
+def majorMinorVersion(version):
+    """
+    Get major and minor version numbers for given Spark version string.
+
+    >>> version = "2.4.0"
+    >>> majorMinorVersion(version)
+    (2, 4)
+
+    >>> version = "abc"
+    >>> majorMinorVersion(version) is None
+    True
+
+    """
+    m = re.search('^(\d+)\.(\d+)(\..*)?$', version)
+    if m is None:
+        return None
+    else:
+        return (int(m.group(1)), int(m.group(2)))
+
+
 if __name__ == "__main__":
     import doctest
     (failure_count, test_count) = doctest.testmod()
     if failure_count:
-        exit(-1)
+        sys.exit(-1)
