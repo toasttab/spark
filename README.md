@@ -2,8 +2,8 @@
 
 use following command
 
-Apache Hadoop 2.7.X and later
-./build/mvn -Pyarn -Phadoop-2.7 -Dhadoop.version=VERSION -DskipTests clean package
+Apache Hadoop 3.1.X and later
+./build/mvn -Pyarn -Phadoop-3.1 -Dhadoop.version=3.1.0 -DskipTests clean package
 
 # Apache Spark
 
