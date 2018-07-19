@@ -4,6 +4,6 @@ import spark
 
 spark {
   notify = false
-  hadoop_profile = '2.7'
-  hadoop_version = '2.7.3'
+  hadoop_profile = '3.1'
+  hadoop_version = '3.1.0'
 }
