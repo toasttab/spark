@@ -2885,7 +2885,7 @@ class SQLTests(ReusedSQLTestCase):
         import pandas as pd
         from datetime import datetime
         pdf = pd.DataFrame({"ts": [datetime(2017, 10, 31, 1, 1, 1)],
-                            "d": [pd.Timestamp.now().date()]})
+                            "d": [pd.Timestamp.now().date()]}, columns=["d", "ts"])
         # test types are inferred correctly without specifying schema
         df = self.spark.createDataFrame(pdf)
         self.assertTrue(isinstance(df.schema['ts'].dataType, TimestampType))
@@ -4690,6 +4690,22 @@ class GroupedMapPandasUDFTests(ReusedSQLTestCase):
         foo_udf = pandas_udf(lambda pdf: pdf, 'time timestamp', PandasUDFType.GROUPED_MAP)
         result = df.groupby('time').apply(foo_udf).sort('time')
         self.assertPandasEqual(df.toPandas(), result.toPandas())
+
+    def test_self_join_with_pandas(self):
+        import pyspark.sql.functions as F
+
+        @F.pandas_udf('key long, col string', F.PandasUDFType.GROUPED_MAP)
+        def dummy_pandas_udf(df):
+            return df[['key', 'col']]
+
+        df = self.spark.createDataFrame([Row(key=1, col='A'), Row(key=1, col='B'),
+                                         Row(key=2, col='C')])
+        dfWithPandas = df.groupBy('key').apply(dummy_pandas_udf)
+
+        # this was throwing an AnalysisException before SPARK-24208
+        res = dfWithPandas.alias('temp0').join(dfWithPandas.alias('temp1'),
+                                               F.col('temp0.key') == F.col('temp1.key'))
+        self.assertEquals(res.count(), 5)
 
 
 if __name__ == "__main__":
