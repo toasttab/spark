@@ -16,13 +16,20 @@
  */
 package org.apache.spark.deploy.k8s
 
+import scala.collection.mutable
+
 import io.fabric8.kubernetes.api.model.{LocalObjectReference, LocalObjectReferenceBuilder, Pod}
+import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.SparkConf
 import org.apache.spark.deploy.k8s.Config._
 import org.apache.spark.deploy.k8s.Constants._
-import org.apache.spark.deploy.k8s.submit.{JavaMainAppResource, MainAppResource}
+import org.apache.spark.deploy.k8s.security.KubernetesHadoopDelegationTokenManager
+import org.apache.spark.deploy.k8s.submit._
+import org.apache.spark.deploy.k8s.submit.KubernetesClientApplication._
 import org.apache.spark.internal.config.ConfigEntry
+import org.apache.spark.util.Utils
+
 
 private[spark] sealed trait KubernetesRoleSpecificConf
 
@@ -30,18 +37,30 @@ private[spark] sealed trait KubernetesRoleSpecificConf
  * Structure containing metadata for Kubernetes logic that builds a Spark driver.
  */
 private[spark] case class KubernetesDriverSpecificConf(
-    mainAppResource: Option[MainAppResource],
+    mainAppResource: MainAppResource,
     mainClass: String,
     appName: String,
-    appArgs: Seq[String]) extends KubernetesRoleSpecificConf
+    appArgs: Seq[String],
+    pyFiles: Seq[String] = Nil) extends KubernetesRoleSpecificConf {
+
+  require(mainAppResource != null, "Main resource must be provided.")
+
+}
 
 /*
  * Structure containing metadata for Kubernetes logic that builds a Spark executor.
  */
 private[spark] case class KubernetesExecutorSpecificConf(
     executorId: String,
-    driverPod: Pod)
+    driverPod: Option[Pod])
   extends KubernetesRoleSpecificConf
+
+/*
+ * Structure containing metadata for HADOOP_CONF_DIR customization
+ */
+private[spark] case class HadoopConfSpec(
+    hadoopConfDir: Option[String],
+    hadoopConfigMapName: Option[String])
 
 /**
  * Structure containing metadata for Kubernetes logic to build Spark pods.
@@ -55,19 +74,18 @@ private[spark] case class KubernetesConf[T <: KubernetesRoleSpecificConf](
     roleAnnotations: Map[String, String],
     roleSecretNamesToMountPaths: Map[String, String],
     roleSecretEnvNamesToKeyRefs: Map[String, String],
-    roleEnvs: Map[String, String]) {
+    roleEnvs: Map[String, String],
+    roleVolumes: Iterable[KubernetesVolumeSpec[_ <: KubernetesVolumeSpecificConf]],
+    hadoopConfSpec: Option[HadoopConfSpec]) {
+
+  def hadoopConfigMapName: String = s"$appResourceNamePrefix-hadoop-config"
+
+  def krbConfigMapName: String = s"$appResourceNamePrefix-krb5-file"
+
+  def tokenManager(conf: SparkConf, hConf: Configuration): KubernetesHadoopDelegationTokenManager =
+    new KubernetesHadoopDelegationTokenManager(conf, hConf)
 
   def namespace(): String = sparkConf.get(KUBERNETES_NAMESPACE)
-
-  def sparkJars(): Seq[String] = sparkConf
-    .getOption("spark.jars")
-    .map(str => str.split(",").toSeq)
-    .getOrElse(Seq.empty[String])
-
-  def sparkFiles(): Seq[String] = sparkConf
-    .getOption("spark.files")
-    .map(str => str.split(",").toSeq)
-    .getOrElse(Seq.empty[String])
 
   def imagePullPolicy(): String = sparkConf.get(CONTAINER_IMAGE_PULL_POLICY)
 
@@ -100,21 +118,11 @@ private[spark] object KubernetesConf {
       appName: String,
       appResourceNamePrefix: String,
       appId: String,
-      mainAppResource: Option[MainAppResource],
+      mainAppResource: MainAppResource,
       mainClass: String,
-      appArgs: Array[String]): KubernetesConf[KubernetesDriverSpecificConf] = {
-    val sparkConfWithMainAppJar = sparkConf.clone()
-    mainAppResource.foreach {
-      case JavaMainAppResource(res) =>
-        val previousJars = sparkConf
-          .getOption("spark.jars")
-          .map(_.split(","))
-          .getOrElse(Array.empty)
-        if (!previousJars.contains(res)) {
-          sparkConfWithMainAppJar.setJars(previousJars ++ Seq(res))
-        }
-    }
-
+      appArgs: Array[String],
+      maybePyFiles: Option[String],
+      hadoopConfDir: Option[String]): KubernetesConf[KubernetesDriverSpecificConf] = {
     val driverCustomLabels = KubernetesUtils.parsePrefixedKeyValuePairs(
       sparkConf, KUBERNETES_DRIVER_LABEL_PREFIX)
     require(!driverCustomLabels.contains(SPARK_APP_ID_LABEL), "Label with key " +
@@ -134,24 +142,47 @@ private[spark] object KubernetesConf {
       sparkConf, KUBERNETES_DRIVER_SECRET_KEY_REF_PREFIX)
     val driverEnvs = KubernetesUtils.parsePrefixedKeyValuePairs(
       sparkConf, KUBERNETES_DRIVER_ENV_PREFIX)
+    val driverVolumes = KubernetesVolumeUtils.parseVolumesWithPrefix(
+      sparkConf, KUBERNETES_DRIVER_VOLUMES_PREFIX).map(_.get)
+    // Also parse executor volumes in order to verify configuration
+    // before the driver pod is created
+    KubernetesVolumeUtils.parseVolumesWithPrefix(
+      sparkConf, KUBERNETES_EXECUTOR_VOLUMES_PREFIX).map(_.get)
+
+    val hadoopConfigMapName = sparkConf.get(KUBERNETES_HADOOP_CONF_CONFIG_MAP)
+    KubernetesUtils.requireNandDefined(
+      hadoopConfDir,
+      hadoopConfigMapName,
+      "Do not specify both the `HADOOP_CONF_DIR` in your ENV and the ConfigMap " +
+      "as the creation of an additional ConfigMap, when one is already specified is extraneous" )
+    val hadoopConfSpec =
+      if (hadoopConfDir.isDefined || hadoopConfigMapName.isDefined) {
+        Some(HadoopConfSpec(hadoopConfDir, hadoopConfigMapName))
+      } else {
+        None
+      }
+    val pyFiles = maybePyFiles.map(Utils.stringToSeq).getOrElse(Nil)
+
 
     KubernetesConf(
-      sparkConfWithMainAppJar,
-      KubernetesDriverSpecificConf(mainAppResource, mainClass, appName, appArgs),
+      sparkConf.clone(),
+      KubernetesDriverSpecificConf(mainAppResource, mainClass, appName, appArgs, pyFiles),
       appResourceNamePrefix,
       appId,
       driverLabels,
       driverAnnotations,
       driverSecretNamesToMountPaths,
       driverSecretEnvNamesToKeyRefs,
-      driverEnvs)
+      driverEnvs,
+      driverVolumes,
+      hadoopConfSpec)
   }
 
   def createExecutorConf(
       sparkConf: SparkConf,
       executorId: String,
       appId: String,
-      driverPod: Pod): KubernetesConf[KubernetesExecutorSpecificConf] = {
+      driverPod: Option[Pod]): KubernetesConf[KubernetesExecutorSpecificConf] = {
     val executorCustomLabels = KubernetesUtils.parsePrefixedKeyValuePairs(
       sparkConf, KUBERNETES_EXECUTOR_LABEL_PREFIX)
     require(
@@ -176,16 +207,30 @@ private[spark] object KubernetesConf {
     val executorEnvSecrets = KubernetesUtils.parsePrefixedKeyValuePairs(
       sparkConf, KUBERNETES_EXECUTOR_SECRET_KEY_REF_PREFIX)
     val executorEnv = sparkConf.getExecutorEnv.toMap
+    val executorVolumes = KubernetesVolumeUtils.parseVolumesWithPrefix(
+      sparkConf, KUBERNETES_EXECUTOR_VOLUMES_PREFIX).map(_.get)
+
+    // If no prefix is defined then we are in pure client mode
+    // (not the one used by cluster mode inside the container)
+    val appResourceNamePrefix = {
+      if (sparkConf.getOption(KUBERNETES_EXECUTOR_POD_NAME_PREFIX.key).isEmpty) {
+        getResourceNamePrefix(getAppName(sparkConf))
+      } else {
+        sparkConf.get(KUBERNETES_EXECUTOR_POD_NAME_PREFIX)
+      }
+    }
 
     KubernetesConf(
       sparkConf.clone(),
       KubernetesExecutorSpecificConf(executorId, driverPod),
-      sparkConf.get(KUBERNETES_EXECUTOR_POD_NAME_PREFIX),
+      appResourceNamePrefix,
       appId,
       executorLabels,
       executorAnnotations,
       executorMountSecrets,
       executorEnvSecrets,
-      executorEnv)
+      executorEnv,
+      executorVolumes,
+      None)
   }
 }

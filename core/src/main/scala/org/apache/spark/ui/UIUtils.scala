@@ -21,6 +21,7 @@ import java.net.URLDecoder
 import java.text.SimpleDateFormat
 import java.util.{Date, Locale, TimeZone}
 import javax.servlet.http.HttpServletRequest
+import javax.ws.rs.core.{MediaType, Response}
 
 import scala.util.control.NonFatal
 import scala.xml._
@@ -217,7 +218,6 @@ private[spark] object UIUtils extends Logging {
       title: String,
       content: => Seq[Node],
       activeTab: SparkUITab,
-      refreshInterval: Option[Int] = None,
       helpText: Option[String] = None,
       showVisualization: Boolean = false,
       useDataTables: Boolean = false): Seq[Node] = {
@@ -565,5 +565,9 @@ private[spark] object UIUtils extends Logging {
       StringEscapeUtils.escapeHtml4(
         NEWLINE_AND_SINGLE_QUOTE_REGEX.replaceAllIn(requestParameter, ""))
     }
+  }
+
+  def buildErrorResponse(status: Response.Status, msg: String): Response = {
+    Response.status(status).entity(msg).`type`(MediaType.TEXT_PLAIN).build()
   }
 }
