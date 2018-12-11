@@ -2795,6 +2795,27 @@
                       <artifactId>aws-java-s3</artifactId>
                       <version>${aws.java.sdk.version}</version>
                     </artifactItem>
+                    <artifactItem>
+                      <groupId>com.amazonaws</groupId>
+                      <artifactId>aws-java-s3</artifactId>
+                      <version>${aws.java.sdk.version}</version>
+                    </artifactItem>
+                    <artifactItem>
+                      <groupId>org.apache.avro</groupId>
+                      <artifactId>avro</artifactId>
+                      <version>${avro.version}</version>
+                    </artifactItem>
+                    <artifactItem>
+                      <groupId>org.apache.avro</groupId>
+                      <artifactId>avro-mapred</artifactId>
+                      <version>${avro.version}</version>
+                      <classifier>${avro.mapred.classifier}</classifier>
+                    </artifactItem>
+                    <artifactItem>
+                      <groupId>org.apache.avro</groupId>
+                      <artifactId>avro-ipc</artifactId>
+                      <version>${avro.version}</version>
+                    </artifactItem>
                   </artifactItems>
                   <outputDirectory>${project.build.directory}/scala-${scala.binary.version}/jars</outputDirectory>
                   <overWriteReleases>false</overWriteReleases>
