@@ -2778,22 +2778,22 @@
                     <artifactItem>
                       <groupId>com.amazonaws</groupId>
                       <artifactId>aws-java-sdk</artifactId>
-                      <version>1.11.351</version>
+                      <version>${aws.java.sdk.version}</version>
                     </artifactItem>
                     <artifactItem>
                       <groupId>com.amazonaws</groupId>
                       <artifactId>aws-java-sdk-core</artifactId>
-                      <version>1.11.351</version>
+                      <version>${aws.java.sdk.version}</version>
                     </artifactItem>
                     <artifactItem>
                       <groupId>com.amazonaws</groupId>
                       <artifactId>aws-java-sdk-kms</artifactId>
-                      <version>1.11.351</version>
+                      <version>${aws.java.sdk.version}</version>
                     </artifactItem>
                     <artifactItem>
                       <groupId>com.amazonaws</groupId>
                       <artifactId>aws-java-s3</artifactId>
-                      <version>1.11.351</version>
+                      <version>${aws.java.sdk.version}</version>
                     </artifactItem>
                   </artifactItems>
                   <outputDirectory>${project.build.directory}/scala-${scala.binary.version}/jars</outputDirectory>
