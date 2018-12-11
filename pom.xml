@@ -2769,9 +2769,9 @@
             <executions>
               <execution>
                 <id>copy-dependencies</id>
-                <phase>assembly</phase>
+                <phase>package</phase>
                 <goals>
-                  <goal>copy-dependencies</goal>
+                  <goal>copy</goal>
                 </goals>
                 <configuration>
                   <artifactItems>
@@ -2792,12 +2792,7 @@
                     </artifactItem>
                     <artifactItem>
                       <groupId>com.amazonaws</groupId>
-                      <artifactId>aws-java-s3</artifactId>
-                      <version>${aws.java.sdk.version}</version>
-                    </artifactItem>
-                    <artifactItem>
-                      <groupId>com.amazonaws</groupId>
-                      <artifactId>aws-java-s3</artifactId>
+                      <artifactId>aws-java-sdk-s3</artifactId>
                       <version>${aws.java.sdk.version}</version>
                     </artifactItem>
                     <artifactItem>
