@@ -2,7 +2,7 @@ For internal toast usage if you are compiling locally
 use following command 
 
 # Apache Hadoop 2.7.X and later
-./build/mvn -Pyarn -Phadoop-2.7 -Dhadoop.version=VERSION -DskipTests clean package
+./build/mvn -Pyarn -Phadoop-2.7 -Dhadoop.version=3.1.0 -DskipTests clean package
 
 
 # Apache Spark
