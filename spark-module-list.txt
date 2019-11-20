@@ -1,4 +1,3 @@
-spark-yarn
 spark-unsafe
 spark-tags
 spark-streaming
@@ -18,3 +17,4 @@ spark-core
 spark-catalyst
 spark-avro
 spark-hadoop-cloud
+spark-hive
