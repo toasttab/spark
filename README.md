@@ -2,8 +2,8 @@
 
 use following command
 
-Apache Hadoop 3.1.X and later
-./build/mvn -Ptoast-lib-enhancement -Pyarn -Phadoop-3.1 -Dhadoop.version=3.1.3 -DskipTests clean package
+Apache Hadoop 3.3.X and later
+./build/mvn -Ptoast-lib-enhancement -Pyarn -Phadoop-3.3 -Dhadoop.version=3.3.1 -DskipTests clean package
 
 
 # Apache Spark
