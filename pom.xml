@@ -209,8 +209,8 @@
     <kubernetes-client.version>5.4.1</kubernetes-client.version>
 
     <!-- Toast Lib Enhancement -->
-    <spark-cassandra-connector.version>2.4.1</spark-cassandra-connector.version>
-    <spark-alchemy.version>0.5.5</spark-alchemy.version>
+    <!--spark-cassandra-connector.version>2.4.1</spark-cassandra-connector.version-->
+    <spark-alchemy.version>1.2.0</spark-alchemy.version>
 
     <test.java.home>${java.home}</test.java.home>
 
