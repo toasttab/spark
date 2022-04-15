@@ -1,5 +1,7 @@
 #!/usr/bin/env groovy
 
+@Library('toast@datascience-pyspark-asset')
+
 import spark
 
 spark {
