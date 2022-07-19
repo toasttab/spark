@@ -140,6 +140,10 @@ class CatalystSqlParser extends AbstractSqlParser {
   val astBuilder = new AstBuilder
 }
 
+class CatalystSqlParser(val conf: SQLConf) extends AbstractSqlParser {
+  val astBuilders = new AstBuilder
+}
+
 /** For test-only. */
 object CatalystSqlParser extends CatalystSqlParser
 
