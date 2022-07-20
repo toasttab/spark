@@ -28,6 +28,7 @@ import org.apache.spark.sql.catalyst.{FunctionIdentifier, SQLConfHelper, TableId
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.trees.Origin
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.errors.QueryParsingErrors
 import org.apache.spark.sql.types.{DataType, StructType}
 
@@ -138,10 +139,9 @@ abstract class AbstractSqlParser extends ParserInterface with SQLConfHelper with
  */
 class CatalystSqlParser extends AbstractSqlParser {
   val astBuilder = new AstBuilder
-}
-
-class CatalystSqlParser(val conf: SQLConf) extends AbstractSqlParser {
-  val astBuilders = new AstBuilder
+  def this(conf: SQLConf) {
+    this()
+  }
 }
 
 /** For test-only. */
