@@ -44,7 +44,8 @@ public class TransportCipher {
   @VisibleForTesting
   static final String ENCRYPTION_HANDLER_NAME = "TransportEncryption";
   private static final String DECRYPTION_HANDLER_NAME = "TransportDecryption";
-  private static final int STREAM_BUFFER_SIZE = 1024 * 32;
+  @VisibleForTesting
+  static final int STREAM_BUFFER_SIZE = 1024 * 32;
 
   private final Properties conf;
   private final String cipher;
@@ -84,11 +85,13 @@ public class TransportCipher {
     return outIv;
   }
 
-  private CryptoOutputStream createOutputStream(WritableByteChannel ch) throws IOException {
+  @VisibleForTesting
+  CryptoOutputStream createOutputStream(WritableByteChannel ch) throws IOException {
     return new CryptoOutputStream(cipher, conf, ch, key, new IvParameterSpec(outIv));
   }
 
-  private CryptoInputStream createInputStream(ReadableByteChannel ch) throws IOException {
+  @VisibleForTesting
+  CryptoInputStream createInputStream(ReadableByteChannel ch) throws IOException {
     return new CryptoInputStream(cipher, conf, ch, key, new IvParameterSpec(inIv));
   }
 
@@ -104,21 +107,29 @@ public class TransportCipher {
       .addFirst(DECRYPTION_HANDLER_NAME, new DecryptionHandler(this));
   }
 
-  private static class EncryptionHandler extends ChannelOutboundHandlerAdapter {
-    private final ByteArrayWritableChannel byteChannel;
+  @VisibleForTesting
+  static class EncryptionHandler extends ChannelOutboundHandlerAdapter {
+    private final ByteArrayWritableChannel byteEncChannel;
     private final CryptoOutputStream cos;
+    private final ByteArrayWritableChannel byteRawChannel;
     private boolean isCipherValid;
 
     EncryptionHandler(TransportCipher cipher) throws IOException {
-      byteChannel = new ByteArrayWritableChannel(STREAM_BUFFER_SIZE);
-      cos = cipher.createOutputStream(byteChannel);
+      byteEncChannel = new ByteArrayWritableChannel(STREAM_BUFFER_SIZE);
+      cos = cipher.createOutputStream(byteEncChannel);
+      byteRawChannel = new ByteArrayWritableChannel(STREAM_BUFFER_SIZE);
       isCipherValid = true;
     }
 
     @Override
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
       throws Exception {
-      ctx.write(new EncryptedMessage(this, cos, msg, byteChannel), promise);
+      ctx.write(createEncryptedMessage(msg), promise);
+    }
+
+    @VisibleForTesting
+    EncryptedMessage createEncryptedMessage(Object msg) {
+      return new EncryptedMessage(this, cos, msg, byteEncChannel, byteRawChannel);
     }
 
     @Override
@@ -158,51 +169,64 @@ public class TransportCipher {
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object data) throws Exception {
-      if (!isCipherValid) {
-        throw new IOException("Cipher is in invalid state.");
-      }
-      byteChannel.feedData((ByteBuf) data);
+      ByteBuf buffer = (ByteBuf) data;
 
-      byte[] decryptedData = new byte[byteChannel.readableBytes()];
-      int offset = 0;
-      while (offset < decryptedData.length) {
-        // SPARK-25535: workaround for CRYPTO-141.
-        try {
-          offset += cis.read(decryptedData, offset, decryptedData.length - offset);
-        } catch (InternalError ie) {
-          isCipherValid = false;
-          throw ie;
+      try {
+        if (!isCipherValid) {
+          throw new IOException("Cipher is in invalid state.");
         }
-      }
+        byte[] decryptedData = new byte[buffer.readableBytes()];
+        byteChannel.feedData(buffer);
 
-      ctx.fireChannelRead(Unpooled.wrappedBuffer(decryptedData, 0, decryptedData.length));
+        int offset = 0;
+        while (offset < decryptedData.length) {
+          // SPARK-25535: workaround for CRYPTO-141.
+          try {
+            offset += cis.read(decryptedData, offset, decryptedData.length - offset);
+          } catch (InternalError ie) {
+            isCipherValid = false;
+            throw ie;
+          }
+        }
+
+        ctx.fireChannelRead(Unpooled.wrappedBuffer(decryptedData, 0, decryptedData.length));
+      } finally {
+        buffer.release();
+      }
     }
 
     @Override
-    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+    public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
+      // We do the closing of the stream / channel in handlerRemoved(...) as
+      // this method will be called in all cases:
+      //
+      //     - when the Channel becomes inactive
+      //     - when the handler is removed from the ChannelPipeline
       try {
         if (isCipherValid) {
           cis.close();
         }
       } finally {
-        super.channelInactive(ctx);
+        super.handlerRemoved(ctx);
       }
     }
   }
 
-  private static class EncryptedMessage extends AbstractFileRegion {
+  @VisibleForTesting
+  static class EncryptedMessage extends AbstractFileRegion {
     private final boolean isByteBuf;
     private final ByteBuf buf;
     private final FileRegion region;
     private final CryptoOutputStream cos;
     private final EncryptionHandler handler;
+    private final long count;
     private long transferred;
 
     // Due to streaming issue CRYPTO-125: https://issues.apache.org/jira/browse/CRYPTO-125, it has
     // to utilize two helper ByteArrayWritableChannel for streaming. One is used to receive raw data
     // from upper handler, another is used to store encrypted data.
-    private ByteArrayWritableChannel byteEncChannel;
-    private ByteArrayWritableChannel byteRawChannel;
+    private final ByteArrayWritableChannel byteEncChannel;
+    private final ByteArrayWritableChannel byteRawChannel;
 
     private ByteBuffer currentEncrypted;
 
@@ -210,7 +234,8 @@ public class TransportCipher {
         EncryptionHandler handler,
         CryptoOutputStream cos,
         Object msg,
-        ByteArrayWritableChannel ch) {
+        ByteArrayWritableChannel byteEncChannel,
+        ByteArrayWritableChannel byteRawChannel) {
       Preconditions.checkArgument(msg instanceof ByteBuf || msg instanceof FileRegion,
         "Unrecognized message type: %s", msg.getClass().getName());
       this.handler = handler;
@@ -218,14 +243,15 @@ public class TransportCipher {
       this.buf = isByteBuf ? (ByteBuf) msg : null;
       this.region = isByteBuf ? null : (FileRegion) msg;
       this.transferred = 0;
-      this.byteRawChannel = new ByteArrayWritableChannel(STREAM_BUFFER_SIZE);
       this.cos = cos;
-      this.byteEncChannel = ch;
+      this.byteEncChannel = byteEncChannel;
+      this.byteRawChannel = byteRawChannel;
+      this.count = isByteBuf ? buf.readableBytes() : region.count();
     }
 
     @Override
     public long count() {
-      return isByteBuf ? buf.readableBytes() : region.count();
+      return count;
     }
 
     @Override
@@ -277,22 +303,38 @@ public class TransportCipher {
     public long transferTo(WritableByteChannel target, long position) throws IOException {
       Preconditions.checkArgument(position == transferred(), "Invalid position.");
 
+      if (transferred == count) {
+        return 0;
+      }
+
+      long totalBytesWritten = 0L;
       do {
         if (currentEncrypted == null) {
           encryptMore();
         }
 
-        int bytesWritten = currentEncrypted.remaining();
-        target.write(currentEncrypted);
-        bytesWritten -= currentEncrypted.remaining();
-        transferred += bytesWritten;
-        if (!currentEncrypted.hasRemaining()) {
+        long remaining = currentEncrypted.remaining();
+        if (remaining == 0)  {
+          // Just for safety to avoid endless loop. It usually won't happen, but since the
+          // underlying `region.transferTo` is allowed to transfer 0 bytes, we should handle it for
+          // safety.
           currentEncrypted = null;
           byteEncChannel.reset();
+          return totalBytesWritten;
         }
-      } while (transferred < count());
 
-      return transferred;
+        long bytesWritten = target.write(currentEncrypted);
+        totalBytesWritten += bytesWritten;
+        transferred += bytesWritten;
+        if (bytesWritten < remaining) {
+          // break as the underlying buffer in "target" is full
+          break;
+        }
+        currentEncrypted = null;
+        byteEncChannel.reset();
+      } while (transferred < count);
+
+      return totalBytesWritten;
     }
 
     private void encryptMore() throws IOException {

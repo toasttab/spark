@@ -24,6 +24,7 @@ import org.apache.spark.sql.catalyst.analysis.SimpleAnalyzer
 import org.apache.spark.sql.catalyst.expressions.codegen.CodegenContext
 import org.apache.spark.sql.catalyst.expressions.objects.AssertNotNull
 import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, Project}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
 class NullExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
@@ -53,7 +54,7 @@ class NullExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
 
   test("AssertNotNUll") {
     val ex = intercept[RuntimeException] {
-      evaluateWithoutCodegen(AssertNotNull(Literal(null), Seq.empty[String]))
+      evaluateWithoutCodegen(AssertNotNull(Literal(null)))
     }.getMessage
     assert(ex.contains("Null value appeared in non-nullable field"))
   }
@@ -112,25 +113,31 @@ class NullExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
     val timestampLit = Literal.create(Timestamp.valueOf("2017-04-12 00:00:00"), TimestampType)
     val decimalLit = Literal.create(BigDecimal.valueOf(10.2), DecimalType(20, 2))
 
-    assert(analyze(new Nvl(decimalLit, stringLit)).dataType == StringType)
+    withSQLConf(SQLConf.ANSI_ENABLED.key -> "false") {
+      assert(analyze(new Nvl(decimalLit, stringLit)).dataType == StringType)
+    }
     assert(analyze(new Nvl(doubleLit, decimalLit)).dataType == DoubleType)
     assert(analyze(new Nvl(decimalLit, doubleLit)).dataType == DoubleType)
     assert(analyze(new Nvl(decimalLit, floatLit)).dataType == DoubleType)
     assert(analyze(new Nvl(floatLit, decimalLit)).dataType == DoubleType)
 
-    assert(analyze(new Nvl(timestampLit, stringLit)).dataType == StringType)
+    withSQLConf(SQLConf.ANSI_ENABLED.key -> "false") {
+      assert(analyze(new Nvl(timestampLit, stringLit)).dataType == StringType)
+      assert(analyze(new Nvl(intLit, stringLit)).dataType == StringType)
+      assert(analyze(new Nvl(stringLit, doubleLit)).dataType == StringType)
+      assert(analyze(new Nvl(doubleLit, stringLit)).dataType == StringType)
+    }
     assert(analyze(new Nvl(intLit, doubleLit)).dataType == DoubleType)
-    assert(analyze(new Nvl(intLit, stringLit)).dataType == StringType)
-    assert(analyze(new Nvl(stringLit, doubleLit)).dataType == StringType)
-    assert(analyze(new Nvl(doubleLit, stringLit)).dataType == StringType)
 
     assert(analyze(new Nvl(nullLit, intLit)).dataType == IntegerType)
     assert(analyze(new Nvl(doubleLit, nullLit)).dataType == DoubleType)
     assert(analyze(new Nvl(nullLit, stringLit)).dataType == StringType)
 
-    assert(analyze(new Nvl(floatLit, stringLit)).dataType == StringType)
+    withSQLConf(SQLConf.ANSI_ENABLED.key -> "false") {
+      assert(analyze(new Nvl(floatLit, stringLit)).dataType == StringType)
+      assert(analyze(new Nvl(floatNullLit, intLit)).dataType == FloatType)
+    }
     assert(analyze(new Nvl(floatLit, doubleLit)).dataType == DoubleType)
-    assert(analyze(new Nvl(floatNullLit, intLit)).dataType == FloatType)
   }
 
   test("AtLeastNNonNulls") {
@@ -160,7 +167,13 @@ class NullExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
     checkEvaluation(AtLeastNNonNulls(4, nullOnly), false, EmptyRow)
   }
 
-  test("Coalesce should not throw 64kb exception") {
+  test("SPARK-34857: AtLeastNNonNulls toString") {
+    val e = AtLeastNNonNulls(2,
+      Seq(Literal(42), Literal("test"), Literal.create(null, DoubleType)))
+    assert(e.toString == "atleastnnonnulls(2, 42, test, null)")
+  }
+
+  test("Coalesce should not throw 64KiB exception") {
     val inputs = (1 to 2500).map(x => Literal(s"x_$x"))
     checkEvaluation(Coalesce(inputs), "x_1")
   }
@@ -171,7 +184,7 @@ class NullExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
     assert(ctx.inlinedMutableStates.size == 1)
   }
 
-  test("AtLeastNNonNulls should not throw 64kb exception") {
+  test("AtLeastNNonNulls should not throw 64KiB exception") {
     val inputs = (1 to 4000).map(x => Literal(s"x_$x"))
     checkEvaluation(AtLeastNNonNulls(1, inputs), true)
   }

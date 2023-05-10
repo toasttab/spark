@@ -23,6 +23,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 import org.apache.spark._
 import org.apache.spark.api.python._
+import org.apache.spark.sql.execution.metric.SQLMetric
+import org.apache.spark.sql.internal.SQLConf
 
 /**
  * A helper class to run Python UDFs in Spark.
@@ -30,9 +32,12 @@ import org.apache.spark.api.python._
 class PythonUDFRunner(
     funcs: Seq[ChainedPythonFunctions],
     evalType: Int,
-    argOffsets: Array[Array[Int]])
+    argOffsets: Array[Array[Int]],
+    pythonMetrics: Map[String, SQLMetric])
   extends BasePythonRunner[Array[Byte], Array[Byte]](
     funcs, evalType, argOffsets) {
+
+  override val simplifiedTraceback: Boolean = SQLConf.get.pysparkSimplifiedTraceback
 
   protected override def newWriterThread(
       env: SparkEnv,
@@ -47,8 +52,13 @@ class PythonUDFRunner(
       }
 
       protected override def writeIteratorToStream(dataOut: DataOutputStream): Unit = {
+        val startData = dataOut.size()
+
         PythonRDD.writeIteratorToStream(inputIterator, dataOut)
         dataOut.writeInt(SpecialLengths.END_OF_DATA_SECTION)
+
+        val deltaData = dataOut.size() - startData
+        pythonMetrics("pythonDataSent") += deltaData
       }
     }
   }
@@ -59,9 +69,11 @@ class PythonUDFRunner(
       startTime: Long,
       env: SparkEnv,
       worker: Socket,
+      pid: Option[Int],
       releasedOrClosed: AtomicBoolean,
       context: TaskContext): Iterator[Array[Byte]] = {
-    new ReaderIterator(stream, writerThread, startTime, env, worker, releasedOrClosed, context) {
+    new ReaderIterator(
+      stream, writerThread, startTime, env, worker, pid, releasedOrClosed, context) {
 
       protected override def read(): Array[Byte] = {
         if (writerThread.exception.isDefined) {
@@ -72,8 +84,9 @@ class PythonUDFRunner(
             case length if length > 0 =>
               val obj = new Array[Byte](length)
               stream.readFully(obj)
+              pythonMetrics("pythonDataReceived") += length
               obj
-            case 0 => Array.empty[Byte]
+            case 0 => Array.emptyByteArray
             case SpecialLengths.TIMING_DATA =>
               handleTimingData()
               read()
@@ -104,7 +117,7 @@ object PythonUDFRunner {
       dataOut.writeInt(chained.funcs.length)
       chained.funcs.foreach { f =>
         dataOut.writeInt(f.command.length)
-        dataOut.write(f.command)
+        dataOut.write(f.command.toArray)
       }
     }
   }

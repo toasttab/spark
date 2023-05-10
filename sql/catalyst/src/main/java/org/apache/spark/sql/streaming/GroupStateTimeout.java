@@ -17,37 +17,50 @@
 
 package org.apache.spark.sql.streaming;
 
+import org.apache.spark.annotation.Evolving;
 import org.apache.spark.annotation.Experimental;
-import org.apache.spark.annotation.InterfaceStability;
 import org.apache.spark.sql.catalyst.plans.logical.*;
 
 /**
  * Represents the type of timeouts possible for the Dataset operations
- * `mapGroupsWithState` and `flatMapGroupsWithState`. See documentation on
- * `GroupState` for more details.
+ * {@code mapGroupsWithState} and {@code flatMapGroupsWithState}.
+ * <p>
+ * See documentation on {@code GroupState} for more details.
  *
  * @since 2.2.0
  */
 @Experimental
-@InterfaceStability.Evolving
+@Evolving
 public class GroupStateTimeout {
+  // NOTE: if you're adding new type of timeout, you should also fix the places below:
+  // - Scala:
+  //     org.apache.spark.sql.execution.streaming.GroupStateImpl.getGroupStateTimeoutFromString
+  // - Python: pyspark.sql.streaming.state.GroupStateTimeout
 
   /**
-   * Timeout based on processing time. The duration of timeout can be set for each group in
-   * `map/flatMapGroupsWithState` by calling `GroupState.setTimeoutDuration()`. See documentation
-   * on `GroupState` for more details.
+   * Timeout based on processing time.
+   * <p>
+   * The duration of timeout can be set for each group in
+   * {@code map/flatMapGroupsWithState} by calling {@code GroupState.setTimeoutDuration()}.
+   * <p>
+   * See documentation on {@code GroupState} for more details.
    */
   public static GroupStateTimeout ProcessingTimeTimeout() {
     return ProcessingTimeTimeout$.MODULE$;
   }
 
   /**
-   * Timeout based on event-time. The event-time timestamp for timeout can be set for each
-   * group in `map/flatMapGroupsWithState` by calling `GroupState.setTimeoutTimestamp()`.
-   * In addition, you have to define the watermark in the query using `Dataset.withWatermark`.
+   * Timeout based on event-time.
+   * <p>
+   * The event-time timestamp for timeout can be set for each
+   * group in {@code map/flatMapGroupsWithState} by calling
+   * {@code GroupState.setTimeoutTimestamp()}.
+   * In addition, you have to define the watermark in the query using
+   * {@code Dataset.withWatermark}.
    * When the watermark advances beyond the set timestamp of a group and the group has not
-   * received any data, then the group times out. See documentation on
-   * `GroupState` for more details.
+   * received any data, then the group times out.
+   * <p>
+   * See documentation on {@code GroupState} for more details.
    */
   public static GroupStateTimeout EventTimeTimeout() { return EventTimeTimeout$.MODULE$; }
 

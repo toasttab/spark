@@ -17,43 +17,11 @@
 
 package org.apache.spark.sql.catalyst.analysis
 
-import org.apache.spark.sql.catalyst.catalog.SessionCatalog
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.catalyst.trees.TreePattern._
 import org.apache.spark.sql.types.DataType
-
-/**
- * Resolve a higher order functions from the catalog. This is different from regular function
- * resolution because lambda functions can only be resolved after the function has been resolved;
- * so we need to resolve higher order function when all children are either resolved or a lambda
- * function.
- */
-case class ResolveHigherOrderFunctions(catalog: SessionCatalog) extends Rule[LogicalPlan] {
-
-  override def apply(plan: LogicalPlan): LogicalPlan = plan.resolveExpressions {
-    case u @ UnresolvedFunction(fn, children, false)
-        if hasLambdaAndResolvedArguments(children) =>
-      withPosition(u) {
-        catalog.lookupFunction(fn, children) match {
-          case func: HigherOrderFunction => func
-          case other => other.failAnalysis(
-            "A lambda function should only be used in a higher order function. However, " +
-              s"its class is ${other.getClass.getCanonicalName}, which is not a " +
-              s"higher order function.")
-        }
-      }
-  }
-
-  /**
-   * Check if the arguments of a function are either resolved or a lambda function.
-   */
-  private def hasLambdaAndResolvedArguments(expressions: Seq[Expression]): Boolean = {
-    val (lambdas, others) = expressions.partition(_.isInstanceOf[LambdaFunction])
-    lambdas.nonEmpty && others.forall(_.resolved)
-  }
-}
 
 /**
  * Resolve the lambda variables exposed by a higher order functions.
@@ -67,11 +35,11 @@ case class ResolveHigherOrderFunctions(catalog: SessionCatalog) extends Rule[Log
  *      be a lambda function defined in an outer scope, or a attribute in produced by the plan's
  *      child. If names are duplicate, the name defined in the most inner scope is used.
  */
-case class ResolveLambdaVariables(conf: SQLConf) extends Rule[LogicalPlan] {
+object ResolveLambdaVariables extends Rule[LogicalPlan] {
 
   type LambdaVariableMap = Map[String, NamedExpression]
 
-  private val canonicalizer = {
+  private def canonicalizer = {
     if (!conf.caseSensitiveAnalysis) {
       // scalastyle:off caselocale
       s: String => s.toLowerCase
@@ -82,7 +50,8 @@ case class ResolveLambdaVariables(conf: SQLConf) extends Rule[LogicalPlan] {
   }
 
   override def apply(plan: LogicalPlan): LogicalPlan = {
-    plan.resolveOperators {
+    plan.resolveOperatorsWithPruning(
+      _.containsAnyPattern(HIGH_ORDER_FUNCTION, LAMBDA_FUNCTION, LAMBDA_VARIABLE), ruleId) {
       case q: LogicalPlan =>
         q.mapExpressions(resolve(_, Map.empty))
     }
@@ -103,14 +72,16 @@ case class ResolveLambdaVariables(conf: SQLConf) extends Rule[LogicalPlan] {
     case LambdaFunction(function, names, _) =>
       if (names.size != argInfo.size) {
         e.failAnalysis(
-          s"The number of lambda function arguments '${names.size}' does not " +
-            "match the number of arguments expected by the higher order function " +
-            s"'${argInfo.size}'.")
+          errorClass = "_LEGACY_ERROR_TEMP_2300",
+          messageParameters = Map(
+            "namesSize" -> names.size.toString,
+            "argInfoSize" -> argInfo.size.toString))
       }
 
       if (names.map(a => canonicalizer(a.name)).distinct.size < names.size) {
         e.failAnalysis(
-          "Lambda function arguments should not have names that are semantically the same.")
+          errorClass = "_LEGACY_ERROR_TEMP_2301",
+          messageParameters = Map.empty)
       }
 
       val arguments = argInfo.zip(names).map {
@@ -150,13 +121,14 @@ case class ResolveLambdaVariables(conf: SQLConf) extends Rule[LogicalPlan] {
       val lambdaMap = l.arguments.map(v => canonicalizer(v.name) -> v).toMap
       l.mapChildren(resolve(_, parentLambdaMap ++ lambdaMap))
 
-    case u @ UnresolvedAttribute(name +: nestedFields) =>
+    case u @ UnresolvedNamedLambdaVariable(name +: nestedFields) =>
       parentLambdaMap.get(canonicalizer(name)) match {
         case Some(lambda) =>
           nestedFields.foldLeft(lambda: Expression) { (expr, fieldName) =>
             ExtractValue(expr, Literal(fieldName), conf.resolver)
           }
-        case None => u
+        case None =>
+          UnresolvedAttribute(u.nameParts)
       }
 
     case _ =>

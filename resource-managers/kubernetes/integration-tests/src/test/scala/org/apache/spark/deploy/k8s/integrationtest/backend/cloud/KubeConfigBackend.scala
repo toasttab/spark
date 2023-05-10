@@ -16,11 +16,10 @@
  */
 package org.apache.spark.deploy.k8s.integrationtest.backend.cloud
 
-import java.nio.file.Paths
-
-import io.fabric8.kubernetes.client.utils.Utils
 import io.fabric8.kubernetes.client.{Config, DefaultKubernetesClient}
+import io.fabric8.kubernetes.client.utils.Utils
 import org.apache.commons.lang3.StringUtils
+
 import org.apache.spark.deploy.k8s.integrationtest.TestConstants
 import org.apache.spark.deploy.k8s.integrationtest.backend.IntegrationTestBackend
 import org.apache.spark.internal.Logging
@@ -38,14 +37,13 @@ private[spark] class KubeConfigBackend(var context: String)
     // Auto-configure K8S client from K8S config file
     if (Utils.getSystemPropertyOrEnvVar(Config.KUBERNETES_KUBECONFIG_FILE, null: String) == null) {
       // Fabric 8 client will automatically assume a default location in this case
-      logWarning(s"No explicit KUBECONFIG specified, will assume .kube/config under your home directory")
+      logWarning("No explicit KUBECONFIG specified, will assume $HOME/.kube/config")
     }
     val config = Config.autoConfigure(context)
 
     // If an explicit master URL was specified then override that detected from the
     // K8S config if it is different
-    var masterUrl = Option(System.getProperty(TestConstants.CONFIG_KEY_KUBE_MASTER_URL))
-      .getOrElse(null)
+    var masterUrl = Option(System.getProperty(TestConstants.CONFIG_KEY_KUBE_MASTER_URL)).orNull
     if (StringUtils.isNotBlank(masterUrl)) {
       // Clean up master URL which would have been specified in Spark format into a normal
       // K8S master URL
@@ -61,6 +59,9 @@ private[spark] class KubeConfigBackend(var context: String)
   }
 
   override def cleanUp(): Unit = {
+    if (defaultClient != null) {
+      defaultClient.close()
+    }
     super.cleanUp()
   }
 

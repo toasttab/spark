@@ -26,7 +26,6 @@ import scala.collection.mutable
 
 import org.json4s.JsonAST._
 import org.json4s.jackson.JsonMethods._
-import org.scalatest.BeforeAndAfterEach
 
 import org.apache.spark._
 import org.apache.spark.deploy.{SparkSubmit, SparkSubmitArguments}
@@ -38,11 +37,11 @@ import org.apache.spark.util.Utils
 /**
  * Tests for the REST application submission protocol used in standalone cluster mode.
  */
-class StandaloneRestSubmitSuite extends SparkFunSuite with BeforeAndAfterEach {
+class StandaloneRestSubmitSuite extends SparkFunSuite {
   private var rpcEnv: Option[RpcEnv] = None
   private var server: Option[RestSubmissionServer] = None
 
-  override def afterEach() {
+  override def afterEach(): Unit = {
     try {
       rpcEnv.foreach(_.shutdown())
       server.foreach(_.stop())
@@ -392,6 +391,18 @@ class StandaloneRestSubmitSuite extends SparkFunSuite with BeforeAndAfterEach {
 
   test("client does not send 'SPARK_ENV_LOADED' env var by default") {
     val environmentVariables = Map("SPARK_VAR" -> "1", "SPARK_ENV_LOADED" -> "1")
+    val filteredVariables = RestSubmissionClient.filterSystemEnvironment(environmentVariables)
+    assert(filteredVariables == Map("SPARK_VAR" -> "1"))
+  }
+
+  test("client does not send 'SPARK_HOME' env var by default") {
+    val environmentVariables = Map("SPARK_VAR" -> "1", "SPARK_HOME" -> "1")
+    val filteredVariables = RestSubmissionClient.filterSystemEnvironment(environmentVariables)
+    assert(filteredVariables == Map("SPARK_VAR" -> "1"))
+  }
+
+  test("client does not send 'SPARK_CONF_DIR' env var by default") {
+    val environmentVariables = Map("SPARK_VAR" -> "1", "SPARK_CONF_DIR" -> "1")
     val filteredVariables = RestSubmissionClient.filterSystemEnvironment(environmentVariables)
     assert(filteredVariables == Map("SPARK_VAR" -> "1"))
   }

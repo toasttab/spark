@@ -34,7 +34,6 @@ import org.apache.spark.network.TransportContext;
 import org.apache.spark.network.client.RpcResponseCallback;
 import org.apache.spark.network.client.TransportClient;
 import org.apache.spark.network.client.TransportClientBootstrap;
-import org.apache.spark.network.sasl.SaslRpcHandler;
 import org.apache.spark.network.sasl.SaslServerBootstrap;
 import org.apache.spark.network.sasl.SecretKeyHolder;
 import org.apache.spark.network.server.RpcHandler;
@@ -65,8 +64,7 @@ public class AuthIntegrationSuite {
 
     ByteBuffer reply = ctx.client.sendRpcSync(JavaUtils.stringToBytes("Ping"), 5000);
     assertEquals("Pong", JavaUtils.bytesToString(reply));
-    assertTrue(ctx.authRpcHandler.doDelegate);
-    assertFalse(ctx.authRpcHandler.delegate instanceof SaslRpcHandler);
+    assertNull(ctx.authRpcHandler.saslHandler);
   }
 
   @Test
@@ -74,13 +72,9 @@ public class AuthIntegrationSuite {
     ctx = new AuthTestCtx();
     ctx.createServer("server");
 
-    try {
-      ctx.createClient("client");
-      fail("Should have failed to create client.");
-    } catch (Exception e) {
-      assertFalse(ctx.authRpcHandler.doDelegate);
-      assertFalse(ctx.serverChannel.isActive());
-    }
+    assertThrows(Exception.class, () -> ctx.createClient("client"));
+    assertFalse(ctx.authRpcHandler.isAuthenticated());
+    assertFalse(ctx.serverChannel.isActive());
   }
 
   @Test
@@ -91,6 +85,8 @@ public class AuthIntegrationSuite {
 
     ByteBuffer reply = ctx.client.sendRpcSync(JavaUtils.stringToBytes("Ping"), 5000);
     assertEquals("Pong", JavaUtils.bytesToString(reply));
+    assertNotNull(ctx.authRpcHandler.saslHandler);
+    assertTrue(ctx.authRpcHandler.isAuthenticated());
   }
 
   @Test
@@ -115,16 +111,45 @@ public class AuthIntegrationSuite {
 
     assertNotNull(ctx.client.getChannel().pipeline()
       .remove(TransportCipher.ENCRYPTION_HANDLER_NAME));
-
-    try {
-      ctx.client.sendRpcSync(JavaUtils.stringToBytes("Ping"), 5000);
-      fail("Should have failed unencrypted RPC.");
-    } catch (Exception e) {
-      assertTrue(ctx.authRpcHandler.doDelegate);
-    }
+    assertThrows(Exception.class,
+      () -> ctx.client.sendRpcSync(JavaUtils.stringToBytes("Ping"), 5000));
+    assertTrue(ctx.authRpcHandler.isAuthenticated());
   }
 
-  private class AuthTestCtx {
+  @Test
+  public void testLargeMessageEncryption() throws Exception {
+    // Use a big length to create a message that cannot be put into the encryption buffer completely
+    final int testErrorMessageLength = TransportCipher.STREAM_BUFFER_SIZE;
+    ctx = new AuthTestCtx(new RpcHandler() {
+      @Override
+      public void receive(
+          TransportClient client,
+          ByteBuffer message,
+          RpcResponseCallback callback) {
+        char[] longMessage = new char[testErrorMessageLength];
+        Arrays.fill(longMessage, 'D');
+        callback.onFailure(new RuntimeException(new String(longMessage)));
+      }
+
+      @Override
+      public StreamManager getStreamManager() {
+        return null;
+      }
+    });
+    ctx.createServer("secret");
+    ctx.createClient("secret");
+
+    Exception e = assertThrows(Exception.class,
+      () -> ctx.client.sendRpcSync(JavaUtils.stringToBytes("Ping"), 5000));
+    assertTrue(ctx.authRpcHandler.isAuthenticated());
+    assertTrue(e.getMessage() + " is not an expected error", e.getMessage().contains("DDDDD"));
+    // Verify we receive the complete error message
+    int messageStart = e.getMessage().indexOf("DDDDD");
+    int messageEnd = e.getMessage().lastIndexOf("DDDDD") + 5;
+    assertEquals(testErrorMessageLength, messageEnd - messageStart);
+  }
+
+  private static class AuthTestCtx {
 
     private final String appId = "testAppId";
     private final TransportConf conf;
@@ -136,10 +161,7 @@ public class AuthIntegrationSuite {
     volatile AuthRpcHandler authRpcHandler;
 
     AuthTestCtx() throws Exception {
-      Map<String, String> testConf = ImmutableMap.of("spark.network.crypto.enabled", "true");
-      this.conf = new TransportConf("rpc", new MapConfigProvider(testConf));
-
-      RpcHandler rpcHandler = new RpcHandler() {
+      this(new RpcHandler() {
         @Override
         public void receive(
             TransportClient client,
@@ -153,8 +175,12 @@ public class AuthIntegrationSuite {
         public StreamManager getStreamManager() {
           return null;
         }
-      };
+      });
+    }
 
+    AuthTestCtx(RpcHandler rpcHandler) throws Exception {
+      Map<String, String> testConf = ImmutableMap.of("spark.network.crypto.enabled", "true");
+      this.conf = new TransportConf("rpc", new MapConfigProvider(testConf));
       this.ctx = new TransportContext(conf, rpcHandler);
     }
 
@@ -195,6 +221,9 @@ public class AuthIntegrationSuite {
       }
       if (server != null) {
         server.close();
+      }
+      if (ctx != null) {
+        ctx.close();
       }
     }
 

@@ -3,6 +3,21 @@ layout: global
 displayTitle: Tuning Spark
 title: Tuning
 description: Tuning and performance optimization guide for Spark SPARK_VERSION_SHORT
+license: |
+  Licensed to the Apache Software Foundation (ASF) under one or more
+  contributor license agreements.  See the NOTICE file distributed with
+  this work for additional information regarding copyright ownership.
+  The ASF licenses this file to You under the Apache License, Version 2.0
+  (the "License"); you may not use this file except in compliance with
+  the License.  You may obtain a copy of the License at
+ 
+     http://www.apache.org/licenses/LICENSE-2.0
+ 
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
 ---
 
 * This will become a table of contents (this text will be scraped).
@@ -115,7 +130,7 @@ variety of workloads without requiring user expertise of how memory is divided i
 Although there are two relevant configurations, the typical user should not need to adjust them
 as the default values are applicable to most workloads:
 
-* `spark.memory.fraction` expresses the size of `M` as a fraction of the (JVM heap space - 300MB)
+* `spark.memory.fraction` expresses the size of `M` as a fraction of the (JVM heap space - 300MiB)
 (default 0.6). The rest of the space (40%) is reserved for user data structures, internal
 metadata in Spark, and safeguarding against OOM errors in the case of sparse and unusually
 large records.
@@ -147,7 +162,7 @@ pointer-based data structures and wrapper objects. There are several ways to do 
    Java standard library.
 2. Avoid nested structures with a lot of small objects and pointers when possible.
 3. Consider using numeric IDs or enumeration objects instead of strings for keys.
-4. If you have less than 32 GB of RAM, set the JVM flag `-XX:+UseCompressedOops` to make pointers be
+4. If you have less than 32 GiB of RAM, set the JVM flag `-XX:+UseCompressedOops` to make pointers be
    four bytes instead of eight. You can add these options in
    [`spark-env.sh`](configuration.html#environment-variables).
 
@@ -202,7 +217,7 @@ The goal of GC tuning in Spark is to ensure that only long-lived RDDs are stored
 the Young generation is sufficiently sized to store short-lived objects. This will help avoid full GCs to collect
 temporary objects created during task execution. Some steps which may be useful are:
 
-* Check if there are too many garbage collections by collecting GC stats. If a full GC is invoked multiple times for
+* Check if there are too many garbage collections by collecting GC stats. If a full GC is invoked multiple times
   before a task completes, it means that there isn't enough memory available for executing tasks.
 
 * If there are too many minor collections but not many major GCs, allocating more memory for Eden would help. You
@@ -220,12 +235,12 @@ temporary objects created during task execution. Some steps which may be useful 
 * Try the G1GC garbage collector with `-XX:+UseG1GC`. It can improve performance in some situations where
   garbage collection is a bottleneck. Note that with large executor heap sizes, it may be important to
   increase the [G1 region size](http://www.oracle.com/technetwork/articles/java/g1gc-1984535.html) 
-  with `-XX:G1HeapRegionSize`
+  with `-XX:G1HeapRegionSize`.
 
 * As an example, if your task is reading data from HDFS, the amount of memory used by the task can be estimated using
   the size of the data block read from HDFS. Note that the size of a decompressed block is often 2 or 3 times the
-  size of the block. So if we wish to have 3 or 4 tasks' worth of working space, and the HDFS block size is 128 MB,
-  we can estimate size of Eden to be `4*3*128MB`.
+  size of the block. So if we wish to have 3 or 4 tasks' worth of working space, and the HDFS block size is 128 MiB,
+  we can estimate the size of Eden to be `4*3*128MiB`.
 
 * Monitor how the frequency and time taken by garbage collection changes with the new settings.
 
@@ -233,7 +248,7 @@ Our experience suggests that the effect of GC tuning depends on your application
 There are [many more tuning options](https://docs.oracle.com/javase/8/docs/technotes/guides/vm/gctuning/index.html) described online,
 but at a high level, managing how frequently full GC takes place can help in reducing the overhead.
 
-GC tuning flags for executors can be specified by setting `spark.executor.extraJavaOptions` in
+GC tuning flags for executors can be specified by setting `spark.executor.defaultJavaOptions` or `spark.executor.extraJavaOptions` in
 a job's configuration.
 
 # Other Considerations
@@ -245,9 +260,20 @@ enough. Spark automatically sets the number of "map" tasks to run on each file a
 (though you can control it through optional parameters to `SparkContext.textFile`, etc), and for
 distributed "reduce" operations, such as `groupByKey` and `reduceByKey`, it uses the largest
 parent RDD's number of partitions. You can pass the level of parallelism as a second argument
-(see the [`spark.PairRDDFunctions`](api/scala/index.html#org.apache.spark.rdd.PairRDDFunctions) documentation),
+(see the [`spark.PairRDDFunctions`](api/scala/org/apache/spark/rdd/PairRDDFunctions.html) documentation),
 or set the config property `spark.default.parallelism` to change the default.
 In general, we recommend 2-3 tasks per CPU core in your cluster.
+
+## Parallel Listing on Input Paths
+
+Sometimes you may also need to increase directory listing parallelism when job input has large number of directories,
+otherwise the process could take a very long time, especially when against object store like S3.
+If your job works on RDD with Hadoop input formats (e.g., via `SparkContext.sequenceFile`), the parallelism is
+controlled via [`spark.hadoop.mapreduce.input.fileinputformat.list-status.num-threads`](https://hadoop.apache.org/docs/current/hadoop-mapreduce-client/hadoop-mapreduce-client-core/mapred-default.xml) (currently default is 1).
+
+For Spark SQL with file-based data sources, you can tune `spark.sql.sources.parallelPartitionDiscovery.threshold` and
+`spark.sql.sources.parallelPartitionDiscovery.parallelism` to improve listing parallelism. Please
+refer to [Spark SQL performance tuning guide](sql-performance-tuning.html) for more details.
 
 ## Memory Usage of Reduce Tasks
 
@@ -267,14 +293,14 @@ available in `SparkContext` can greatly reduce the size of each serialized task,
 of launching a job over a cluster. If your tasks use any large object from the driver program
 inside of them (e.g. a static lookup table), consider turning it into a broadcast variable.
 Spark prints the serialized size of each task on the master, so you can look at that to
-decide whether your tasks are too large; in general tasks larger than about 20 KB are probably
+decide whether your tasks are too large; in general, tasks larger than about 20 KiB are probably
 worth optimizing.
 
 ## Data Locality
 
 Data locality can have a major impact on the performance of Spark jobs.  If data and the code that
-operates on it are together then computation tends to be fast.  But if code and data are separated,
-one must move to the other.  Typically it is faster to ship serialized code from place to place than
+operates on it are together, then computation tends to be fast.  But if code and data are separated,
+one must move to the other.  Typically, it is faster to ship serialized code from place to place than
 a chunk of data because code size is much smaller than data.  Spark builds its scheduling around
 this general principle of data locality.
 
@@ -282,14 +308,14 @@ Data locality is how close data is to the code processing it.  There are several
 locality based on the data's current location.  In order from closest to farthest:
 
 - `PROCESS_LOCAL` data is in the same JVM as the running code.  This is the best locality
-  possible
+  possible.
 - `NODE_LOCAL` data is on the same node.  Examples might be in HDFS on the same node, or in
   another executor on the same node.  This is a little slower than `PROCESS_LOCAL` because the data
-  has to travel between processes
-- `NO_PREF` data is accessed equally quickly from anywhere and has no locality preference
+  has to travel between processes.
+- `NO_PREF` data is accessed equally quickly from anywhere and has no locality preference.
 - `RACK_LOCAL` data is on the same rack of servers.  Data is on a different server on the same rack
-  so needs to be sent over the network, typically through a single switch
-- `ANY` data is elsewhere on the network and not in the same rack
+  so needs to be sent over the network, typically through a single switch.
+- `ANY` data is elsewhere on the network and not in the same rack.
 
 Spark prefers to schedule all tasks at the best locality level, but this is not always possible.  In
 situations where there is no unprocessed data on any idle executor, Spark switches to lower locality

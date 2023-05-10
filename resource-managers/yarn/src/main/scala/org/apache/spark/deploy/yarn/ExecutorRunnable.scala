@@ -17,7 +17,6 @@
 
 package org.apache.spark.deploy.yarn
 
-import java.io.File
 import java.nio.ByteBuffer
 import java.util.Collections
 
@@ -33,7 +32,7 @@ import org.apache.hadoop.yarn.api.records._
 import org.apache.hadoop.yarn.client.api.NMClient
 import org.apache.hadoop.yarn.conf.YarnConfiguration
 import org.apache.hadoop.yarn.ipc.YarnRPC
-import org.apache.hadoop.yarn.util.{ConverterUtils, Records}
+import org.apache.hadoop.yarn.util.Records
 
 import org.apache.spark.{SecurityManager, SparkConf, SparkException}
 import org.apache.spark.internal.Logging
@@ -52,7 +51,8 @@ private[yarn] class ExecutorRunnable(
     executorCores: Int,
     appId: String,
     securityMgr: SecurityManager,
-    localResources: Map[String, LocalResource]) extends Logging {
+    localResources: Map[String, LocalResource],
+    resourceProfileId: Int) extends Logging {
 
   var rpc: YarnRPC = YarnRPC.create(conf)
   var nmClient: NMClient = _
@@ -71,11 +71,11 @@ private[yarn] class ExecutorRunnable(
 
     s"""
     |===============================================================================
-    |YARN executor launch context:
+    |Default YARN executor launch context:
     |  env:
     |${Utils.redact(sparkConf, env.toSeq).map { case (k, v) => s"    $k -> $v\n" }.mkString}
     |  command:
-    |    ${commands.mkString(" \\ \n      ")}
+    |    ${Utils.redactCommandLineArgs(sparkConf, commands).mkString(" \\ \n      ")}
     |
     |  resources:
     |${localResources.map { case (k, v) => s"    $k -> $v\n" }.mkString}
@@ -114,7 +114,8 @@ private[yarn] class ExecutorRunnable(
           // Authentication is not enabled, so just provide dummy metadata
           ByteBuffer.allocate(0)
         }
-      ctx.setServiceData(Collections.singletonMap("spark_shuffle", secretBytes))
+      val serviceName = sparkConf.get(SHUFFLE_SERVICE_NAME)
+      ctx.setServiceData(Collections.singletonMap(serviceName, secretBytes))
     }
 
     // Send the start request to the ContainerManager
@@ -158,56 +159,20 @@ private[yarn] class ExecutorRunnable(
       .filter { case (k, v) => SparkConf.isExecutorStartupConf(k) }
       .foreach { case (k, v) => javaOpts += YarnSparkHadoopUtil.escapeForShell(s"-D$k=$v") }
 
-    // Commenting it out for now - so that people can refer to the properties if required. Remove
-    // it once cpuset version is pushed out.
-    // The context is, default gc for server class machines end up using all cores to do gc - hence
-    // if there are multiple containers in same node, spark gc effects all other containers
-    // performance (which can also be other spark containers)
-    // Instead of using this, rely on cpusets by YARN to enforce spark behaves 'properly' in
-    // multi-tenant environments. Not sure how default java gc behaves if it is limited to subset
-    // of cores on a node.
-    /*
-        else {
-          // If no java_opts specified, default to using -XX:+CMSIncrementalMode
-          // It might be possible that other modes/config is being done in
-          // spark.executor.extraJavaOptions, so we don't want to mess with it.
-          // In our expts, using (default) throughput collector has severe perf ramifications in
-          // multi-tenant machines
-          // The options are based on
-          // http://www.oracle.com/technetwork/java/gc-tuning-5-138395.html#0.0.0.%20When%20to%20Use
-          // %20the%20Concurrent%20Low%20Pause%20Collector|outline
-          javaOpts += "-XX:+UseConcMarkSweepGC"
-          javaOpts += "-XX:+CMSIncrementalMode"
-          javaOpts += "-XX:+CMSIncrementalPacing"
-          javaOpts += "-XX:CMSIncrementalDutyCycleMin=0"
-          javaOpts += "-XX:CMSIncrementalDutyCycle=10"
-        }
-    */
-
     // For log4j configuration to reference
     javaOpts += ("-Dspark.yarn.app.container.log.dir=" + ApplicationConstants.LOG_DIR_EXPANSION_VAR)
-
-    val userClassPath = Client.getUserClasspath(sparkConf).flatMap { uri =>
-      val absPath =
-        if (new File(uri.getPath()).isAbsolute()) {
-          Client.getClusterPath(sparkConf, uri.getPath())
-        } else {
-          Client.buildPath(Environment.PWD.$(), uri.getPath())
-        }
-      Seq("--user-class-path", "file:" + absPath)
-    }.toSeq
 
     YarnSparkHadoopUtil.addOutOfMemoryErrorArgument(javaOpts)
     val commands = prefixEnv ++
       Seq(Environment.JAVA_HOME.$$() + "/bin/java", "-server") ++
       javaOpts ++
-      Seq("org.apache.spark.executor.CoarseGrainedExecutorBackend",
+      Seq("org.apache.spark.executor.YarnCoarseGrainedExecutorBackend",
         "--driver-url", masterAddress,
         "--executor-id", executorId,
         "--hostname", hostname,
         "--cores", executorCores.toString,
-        "--app-id", appId) ++
-      userClassPath ++
+        "--app-id", appId,
+        "--resourceProfileId", resourceProfileId.toString) ++
       Seq(
         s"1>${ApplicationConstants.LOG_DIR_EXPANSION_VAR}/stdout",
         s"2>${ApplicationConstants.LOG_DIR_EXPANSION_VAR}/stderr")
@@ -220,13 +185,6 @@ private[yarn] class ExecutorRunnable(
     val env = new HashMap[String, String]()
     Client.populateClasspath(null, conf, sparkConf, env, sparkConf.get(EXECUTOR_CLASS_PATH))
 
-    // lookup appropriate http scheme for container log urls
-    val yarnHttpPolicy = conf.get(
-      YarnConfiguration.YARN_HTTP_POLICY_KEY,
-      YarnConfiguration.YARN_HTTP_POLICY_DEFAULT
-    )
-    val httpScheme = if (yarnHttpPolicy == "HTTPS_ONLY") "https://" else "http://"
-
     System.getenv().asScala.filterKeys(_.startsWith("SPARK"))
       .foreach { case (k, v) => env(k) = v }
 
@@ -238,18 +196,6 @@ private[yarn] class ExecutorRunnable(
       } else {
         // For other env variables, simply overwrite the value.
         env(key) = value
-      }
-    }
-
-    // Add log urls
-    container.foreach { c =>
-      sys.env.get("SPARK_USER").foreach { user =>
-        val containerId = ConverterUtils.toString(c.getId)
-        val address = c.getNodeHttpAddress
-        val baseUrl = s"$httpScheme$address/node/containerlogs/$containerId/$user"
-
-        env("SPARK_LOG_URL_STDERR") = s"$baseUrl/stderr?start=-4096"
-        env("SPARK_LOG_URL_STDOUT") = s"$baseUrl/stdout?start=-4096"
       }
     }
 

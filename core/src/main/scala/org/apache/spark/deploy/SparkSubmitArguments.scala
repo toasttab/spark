@@ -19,19 +19,18 @@ package org.apache.spark.deploy
 
 import java.io.{ByteArrayOutputStream, File, PrintStream}
 import java.lang.reflect.InvocationTargetException
-import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.util.{List => JList}
-import java.util.jar.JarFile
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer, HashMap}
 import scala.io.Source
 import scala.util.Try
 
-import org.apache.spark.{SparkException, SparkUserAppException}
+import org.apache.spark.{SparkConf, SparkException, SparkUserAppException}
 import org.apache.spark.deploy.SparkSubmitAction._
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.config.DYN_ALLOCATION_ENABLED
 import org.apache.spark.launcher.SparkSubmitArgumentsParser
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.util.Utils
@@ -42,7 +41,10 @@ import org.apache.spark.util.Utils
  */
 private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, String] = sys.env)
   extends SparkSubmitArgumentsParser with Logging {
-  var master: String = null
+  var maybeMaster: Option[String] = None
+  // Global defaults. These should be keep to minimum to avoid confusing behavior.
+  def master: String = maybeMaster.getOrElse("local[*]")
+  var maybeRemote: Option[String] = None
   var deployMode: String = null
   var executorMemory: String = null
   var executorCores: String = null
@@ -138,10 +140,10 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
    * Remove keys that don't start with "spark." from `sparkProperties`.
    */
   private def ignoreNonSparkProperties(): Unit = {
-    sparkProperties.foreach { case (k, v) =>
+    sparkProperties.keys.foreach { k =>
       if (!k.startsWith("spark.")) {
         sparkProperties -= k
-        logWarning(s"Ignoring non-spark config property: $k=$v")
+        logWarning(s"Ignoring non-Spark config property: $k")
       }
     }
   }
@@ -150,91 +152,69 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
    * Load arguments from environment variables, Spark properties etc.
    */
   private def loadEnvironmentArguments(): Unit = {
-    master = Option(master)
+    maybeMaster = maybeMaster
       .orElse(sparkProperties.get("spark.master"))
       .orElse(env.get("MASTER"))
-      .orNull
+    maybeRemote = maybeRemote
+      .orElse(sparkProperties.get("spark.remote"))
+      .orElse(env.get("SPARK_REMOTE"))
+
     driverExtraClassPath = Option(driverExtraClassPath)
-      .orElse(sparkProperties.get("spark.driver.extraClassPath"))
+      .orElse(sparkProperties.get(config.DRIVER_CLASS_PATH.key))
       .orNull
     driverExtraJavaOptions = Option(driverExtraJavaOptions)
-      .orElse(sparkProperties.get("spark.driver.extraJavaOptions"))
+      .orElse(sparkProperties.get(config.DRIVER_JAVA_OPTIONS.key))
       .orNull
     driverExtraLibraryPath = Option(driverExtraLibraryPath)
-      .orElse(sparkProperties.get("spark.driver.extraLibraryPath"))
+      .orElse(sparkProperties.get(config.DRIVER_LIBRARY_PATH.key))
       .orNull
     driverMemory = Option(driverMemory)
-      .orElse(sparkProperties.get("spark.driver.memory"))
+      .orElse(sparkProperties.get(config.DRIVER_MEMORY.key))
       .orElse(env.get("SPARK_DRIVER_MEMORY"))
       .orNull
     driverCores = Option(driverCores)
-      .orElse(sparkProperties.get("spark.driver.cores"))
+      .orElse(sparkProperties.get(config.DRIVER_CORES.key))
       .orNull
     executorMemory = Option(executorMemory)
-      .orElse(sparkProperties.get("spark.executor.memory"))
+      .orElse(sparkProperties.get(config.EXECUTOR_MEMORY.key))
       .orElse(env.get("SPARK_EXECUTOR_MEMORY"))
       .orNull
     executorCores = Option(executorCores)
-      .orElse(sparkProperties.get("spark.executor.cores"))
+      .orElse(sparkProperties.get(config.EXECUTOR_CORES.key))
       .orElse(env.get("SPARK_EXECUTOR_CORES"))
       .orNull
     totalExecutorCores = Option(totalExecutorCores)
-      .orElse(sparkProperties.get("spark.cores.max"))
+      .orElse(sparkProperties.get(config.CORES_MAX.key))
       .orNull
     name = Option(name).orElse(sparkProperties.get("spark.app.name")).orNull
-    jars = Option(jars).orElse(sparkProperties.get("spark.jars")).orNull
-    files = Option(files).orElse(sparkProperties.get("spark.files")).orNull
-    pyFiles = Option(pyFiles).orElse(sparkProperties.get("spark.submit.pyFiles")).orNull
-    ivyRepoPath = sparkProperties.get("spark.jars.ivy").orNull
-    ivySettingsPath = sparkProperties.get("spark.jars.ivySettings")
-    packages = Option(packages).orElse(sparkProperties.get("spark.jars.packages")).orNull
+    jars = Option(jars).orElse(sparkProperties.get(config.JARS.key)).orNull
+    files = Option(files).orElse(sparkProperties.get(config.FILES.key)).orNull
+    archives = Option(archives).orElse(sparkProperties.get(config.ARCHIVES.key)).orNull
+    pyFiles = Option(pyFiles).orElse(sparkProperties.get(config.SUBMIT_PYTHON_FILES.key)).orNull
+    ivyRepoPath = sparkProperties.get(config.JAR_IVY_REPO_PATH.key).orNull
+    ivySettingsPath = sparkProperties.get(config.JAR_IVY_SETTING_PATH.key)
+    packages = Option(packages).orElse(sparkProperties.get(config.JAR_PACKAGES.key)).orNull
     packagesExclusions = Option(packagesExclusions)
-      .orElse(sparkProperties.get("spark.jars.excludes")).orNull
+      .orElse(sparkProperties.get(config.JAR_PACKAGES_EXCLUSIONS.key)).orNull
     repositories = Option(repositories)
-      .orElse(sparkProperties.get("spark.jars.repositories")).orNull
+      .orElse(sparkProperties.get(config.JAR_REPOSITORIES.key)).orNull
     deployMode = Option(deployMode)
-      .orElse(sparkProperties.get("spark.submit.deployMode"))
+      .orElse(sparkProperties.get(config.SUBMIT_DEPLOY_MODE.key))
       .orElse(env.get("DEPLOY_MODE"))
       .orNull
     numExecutors = Option(numExecutors)
-      .getOrElse(sparkProperties.get("spark.executor.instances").orNull)
+      .getOrElse(sparkProperties.get(config.EXECUTOR_INSTANCES.key).orNull)
     queue = Option(queue).orElse(sparkProperties.get("spark.yarn.queue")).orNull
     keytab = Option(keytab)
-      .orElse(sparkProperties.get("spark.kerberos.keytab"))
+      .orElse(sparkProperties.get(config.KEYTAB.key))
       .orElse(sparkProperties.get("spark.yarn.keytab"))
       .orNull
     principal = Option(principal)
-      .orElse(sparkProperties.get("spark.kerberos.principal"))
+      .orElse(sparkProperties.get(config.PRINCIPAL.key))
       .orElse(sparkProperties.get("spark.yarn.principal"))
       .orNull
     dynamicAllocationEnabled =
-      sparkProperties.get("spark.dynamicAllocation.enabled").exists("true".equalsIgnoreCase)
-
-    // Try to set main class from JAR if no --class argument is given
-    if (mainClass == null && !isPython && !isR && primaryResource != null) {
-      val uri = new URI(primaryResource)
-      val uriScheme = uri.getScheme()
-
-      uriScheme match {
-        case "file" =>
-          try {
-            Utils.tryWithResource(new JarFile(uri.getPath)) { jar =>
-              // Note that this might still return null if no main-class is set; we catch that later
-              mainClass = jar.getManifest.getMainAttributes.getValue("Main-Class")
-            }
-          } catch {
-            case _: Exception =>
-              error(s"Cannot load main class from JAR $primaryResource")
-          }
-        case _ =>
-          error(
-            s"Cannot load main class from JAR $primaryResource with URI $uriScheme. " +
-            "Please specify a class through --class.")
-      }
-    }
-
-    // Global defaults. These should be keep to minimum to avoid confusing behavior.
-    master = Option(master).getOrElse("local[*]")
+      sparkProperties.get(DYN_ALLOCATION_ENABLED.key).exists("true".equalsIgnoreCase)
 
     // In YARN mode, app name can be set via SPARK_YARN_APP_NAME (see SPARK-5222)
     if (master.startsWith("yarn")) {
@@ -265,11 +245,12 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
     if (args.length == 0) {
       printUsageAndExit(-1)
     }
+    if (!sparkProperties.contains("spark.local.connect") &&
+        maybeRemote.isDefined && (maybeMaster.isDefined || deployMode != null)) {
+      error("Remote cannot be specified with master and/or deploy mode.")
+    }
     if (primaryResource == null) {
       error("Must specify a primary resource (JAR or Python or R file)")
-    }
-    if (mainClass == null && SparkSubmit.isUserJar(primaryResource)) {
-      error("No main class set in JAR; please specify one with --class")
     }
     if (driverMemory != null
         && Try(JavaUtils.byteStringAsBytes(driverMemory)).getOrElse(-1L) <= 0) {
@@ -278,6 +259,9 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
     if (executorMemory != null
         && Try(JavaUtils.byteStringAsBytes(executorMemory)).getOrElse(-1L) <= 0) {
       error("Executor memory must be a positive number")
+    }
+    if (driverCores != null && Try(driverCores.toInt).getOrElse(-1) <= 0) {
+      error("Driver cores must be a positive number")
     }
     if (executorCores != null && Try(executorCores.toInt).getOrElse(-1) <= 0) {
       error("Executor cores must be a positive number")
@@ -304,19 +288,12 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
   }
 
   private def validateKillArguments(): Unit = {
-    if (!master.startsWith("spark://") && !master.startsWith("mesos://")) {
-      error("Killing submissions is only supported in standalone or Mesos mode!")
-    }
     if (submissionToKill == null) {
       error("Please specify a submission to kill.")
     }
   }
 
   private def validateStatusRequestArguments(): Unit = {
-    if (!master.startsWith("spark://") && !master.startsWith("mesos://")) {
-      error(
-        "Requesting submission statuses is only supported in standalone or Mesos mode!")
-    }
     if (submissionToRequestStatusFor == null) {
       error("Please specify a submission to request status for.")
     }
@@ -329,6 +306,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
   override def toString: String = {
     s"""Parsed arguments:
     |  master                  $master
+    |  remote                  ${maybeRemote.orNull}
     |  deployMode              $deployMode
     |  executorMemory          $executorMemory
     |  executorCores           $executorCores
@@ -357,7 +335,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
     |
     |Spark properties used, including those specified through
     | --conf and those from the properties file $propertiesFile:
-    |${Utils.redact(sparkProperties).mkString("  ", "\n  ", "\n")}
+    |${Utils.redact(sparkProperties).sorted.mkString("  ", "\n  ", "\n")}
     """.stripMargin
   }
 
@@ -368,7 +346,10 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
         name = value
 
       case MASTER =>
-        master = value
+        maybeMaster = Option(value)
+
+      case REMOTE =>
+        maybeRemote = Option(value)
 
       case CLASS =>
         mainClass = value
@@ -511,7 +492,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
     if (unknownParam != null) {
       logInfo("Unknown/unsupported param " + unknownParam)
     }
-    val command = sys.env.get("_SPARK_CMD_USAGE").getOrElse(
+    val command = sys.env.getOrElse("_SPARK_CMD_USAGE",
       """Usage: spark-submit [options] <app jar | python file | R file> [app arguments]
         |Usage: spark-submit --kill [submission ID] --master [spark://...]
         |Usage: spark-submit --status [submission ID] --master [spark://...]
@@ -546,8 +527,10 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
         |  --files FILES               Comma-separated list of files to be placed in the working
         |                              directory of each executor. File paths of these files
         |                              in executors can be accessed via SparkFiles.get(fileName).
+        |  --archives ARCHIVES         Comma-separated list of archives to be extracted into the
+        |                              working directory of each executor.
         |
-        |  --conf PROP=VALUE           Arbitrary Spark configuration property.
+        |  --conf, -c PROP=VALUE       Arbitrary Spark configuration property.
         |  --properties-file FILE      Path to a file from which to load extra properties. If not
         |                              specified, this will look for conf/spark-defaults.conf.
         |
@@ -567,36 +550,41 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
         |  --verbose, -v               Print additional debug output.
         |  --version,                  Print the version of current Spark.
         |
+        | Spark Connect only:
+        |   --remote CONNECT_URL       URL to connect to the server for Spark Connect, e.g.,
+        |                              sc://host:port. --master and --deploy-mode cannot be set
+        |                              together with this option. This option is experimental, and
+        |                              might change between minor releases.
+        |
         | Cluster deploy mode only:
         |  --driver-cores NUM          Number of cores used by the driver, only in cluster mode
         |                              (Default: 1).
         |
         | Spark standalone or Mesos with cluster deploy mode only:
         |  --supervise                 If given, restarts the driver on failure.
+        |
+        | Spark standalone, Mesos or K8s with cluster deploy mode only:
         |  --kill SUBMISSION_ID        If given, kills the driver specified.
         |  --status SUBMISSION_ID      If given, requests the status of the driver specified.
         |
-        | Spark standalone and Mesos only:
+        | Spark standalone, Mesos and Kubernetes only:
         |  --total-executor-cores NUM  Total cores for all executors.
         |
-        | Spark standalone and YARN only:
-        |  --executor-cores NUM        Number of cores per executor. (Default: 1 in YARN mode,
-        |                              or all available cores on the worker in standalone mode)
+        | Spark standalone, YARN and Kubernetes only:
+        |  --executor-cores NUM        Number of cores used by each executor. (Default: 1 in
+        |                              YARN and K8S modes, or all available cores on the worker
+        |                              in standalone mode).
         |
-        | YARN-only:
-        |  --queue QUEUE_NAME          The YARN queue to submit to (Default: "default").
+        | Spark on YARN and Kubernetes only:
         |  --num-executors NUM         Number of executors to launch (Default: 2).
         |                              If dynamic allocation is enabled, the initial number of
         |                              executors will be at least NUM.
-        |  --archives ARCHIVES         Comma separated list of archives to be extracted into the
-        |                              working directory of each executor.
-        |  --principal PRINCIPAL       Principal to be used to login to KDC, while running on
-        |                              secure HDFS.
+        |  --principal PRINCIPAL       Principal to be used to login to KDC.
         |  --keytab KEYTAB             The full path to the file that contains the keytab for the
-        |                              principal specified above. This keytab will be copied to
-        |                              the node running the Application Master via the Secure
-        |                              Distributed Cache, for renewing the login tickets and the
-        |                              delegation tokens periodically.
+        |                              principal specified above.
+        |
+        | Spark on YARN only:
+        |  --queue QUEUE_NAME          The YARN queue to submit to (Default: "default").
       """.stripMargin
     )
 
@@ -635,8 +623,7 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
       System.setSecurityManager(sm)
 
       try {
-        Utils.classForName(mainClass).getMethod("main", classOf[Array[String]])
-          .invoke(null, Array(HELP))
+        Utils.classForName(mainClass).getMethod("printUsage").invoke(null)
       } catch {
         case e: InvocationTargetException =>
           // Ignore SecurityException, since we throw it above.
@@ -662,4 +649,10 @@ private[deploy] class SparkSubmitArguments(args: Seq[String], env: Map[String, S
 
   private def error(msg: String): Unit = throw new SparkException(msg)
 
+  private[deploy] def toSparkConf(sparkConf: Option[SparkConf] = None): SparkConf = {
+    // either use an existing config or create a new empty one
+    sparkProperties.foldLeft(sparkConf.getOrElse(new SparkConf())) {
+      case (conf, (k, v)) => conf.set(k, v)
+    }
+  }
 }

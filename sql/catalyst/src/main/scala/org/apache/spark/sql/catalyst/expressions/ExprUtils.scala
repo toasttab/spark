@@ -17,41 +17,38 @@
 
 package org.apache.spark.sql.catalyst.expressions
 
-import org.apache.spark.sql.AnalysisException
-import org.apache.spark.sql.catalyst.util.ArrayBasedMapData
+import java.text.{DecimalFormat, DecimalFormatSymbols, ParsePosition}
+import java.util.Locale
+
+import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
+import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.{DataTypeMismatch, TypeCheckSuccess}
+import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, CharVarcharUtils}
+import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryErrorsBase, QueryExecutionErrors}
 import org.apache.spark.sql.types.{DataType, MapType, StringType, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 
-object ExprUtils {
+object ExprUtils extends QueryErrorsBase {
 
-  def evalSchemaExpr(exp: Expression): StructType = {
-    // Use `DataType.fromDDL` since the type string can be struct<...>.
-    val dataType = exp match {
-      case Literal(s, StringType) =>
-        DataType.fromDDL(s.toString)
-      case e @ SchemaOfCsv(_: Literal, _) =>
-        val ddlSchema = e.eval(EmptyRow).asInstanceOf[UTF8String]
-        DataType.fromDDL(ddlSchema.toString)
-      case e => throw new AnalysisException(
-        "Schema should be specified in DDL format as a string literal or output of " +
-          s"the schema_of_csv function instead of ${e.sql}")
-    }
+  def evalTypeExpr(exp: Expression): DataType = {
+    if (exp.foldable) {
+      exp.eval() match {
+        case s: UTF8String if s != null =>
+          val dataType = DataType.fromDDL(s.toString)
+          CharVarcharUtils.failIfHasCharVarchar(dataType)
+        case _ => throw QueryCompilationErrors.unexpectedSchemaTypeError(exp)
 
-    if (!dataType.isInstanceOf[StructType]) {
-      throw new AnalysisException(
-        s"Schema should be struct type but got ${dataType.sql}.")
+      }
+    } else {
+      throw QueryCompilationErrors.unexpectedSchemaTypeError(exp)
     }
-    dataType.asInstanceOf[StructType]
   }
 
-  def evalTypeExpr(exp: Expression): DataType = exp match {
-    case Literal(s, StringType) => DataType.fromDDL(s.toString)
-    case e @ SchemaOfJson(_: Literal, _) =>
-      val ddlSchema = e.eval(EmptyRow).asInstanceOf[UTF8String]
-      DataType.fromDDL(ddlSchema.toString)
-    case e => throw new AnalysisException(
-      "Schema should be specified in DDL format as a string literal or output of " +
-        s"the schema_of_json function instead of ${e.sql}")
+  def evalSchemaExpr(exp: Expression): StructType = {
+    val dataType = evalTypeExpr(exp)
+    if (!dataType.isInstanceOf[StructType]) {
+      throw QueryCompilationErrors.schemaIsNotStructTypeError(exp, dataType)
+    }
+    dataType.asInstanceOf[StructType]
   }
 
   def convertToMapData(exp: Expression): Map[String, String] = exp match {
@@ -62,9 +59,62 @@ object ExprUtils {
         key.toString -> value.toString
       }
     case m: CreateMap =>
-      throw new AnalysisException(
-        s"A type of keys and values in map() must be string, but got ${m.dataType.catalogString}")
+      throw QueryCompilationErrors.keyValueInMapNotStringError(m)
     case _ =>
-      throw new AnalysisException("Must use a map() function for options")
+      throw QueryCompilationErrors.nonMapFunctionNotAllowedError
+  }
+
+  /**
+   * A convenient function for schema validation in datasources supporting
+   * `columnNameOfCorruptRecord` as an option.
+   */
+  def verifyColumnNameOfCorruptRecord(
+      schema: StructType,
+      columnNameOfCorruptRecord: String): Unit = {
+    schema.getFieldIndex(columnNameOfCorruptRecord).foreach { corruptFieldIndex =>
+      val f = schema(corruptFieldIndex)
+      if (f.dataType != StringType || !f.nullable) {
+        throw QueryCompilationErrors.invalidFieldTypeForCorruptRecordError
+      }
+    }
+  }
+
+  def getDecimalParser(locale: Locale): String => java.math.BigDecimal = {
+    if (locale == Locale.US) { // Special handling the default locale for backward compatibility
+      (s: String) => new java.math.BigDecimal(s.replaceAll(",", ""))
+    } else {
+      val decimalFormat = new DecimalFormat("", new DecimalFormatSymbols(locale))
+      decimalFormat.setParseBigDecimal(true)
+      (s: String) => {
+        val pos = new ParsePosition(0)
+        val result = decimalFormat.parse(s, pos).asInstanceOf[java.math.BigDecimal]
+        if (pos.getIndex() != s.length() || pos.getErrorIndex() != -1) {
+          throw QueryExecutionErrors.cannotParseDecimalError
+        } else {
+          result
+        }
+      }
+    }
+  }
+
+  /**
+   * Check if the schema is valid for Json
+   * @param schema The schema to check.
+   * @return
+   *  `TypeCheckSuccess` if the schema is valid
+   *  `DataTypeMismatch` with an error error if the schema is not valid
+   */
+  def checkJsonSchema(schema: DataType): TypeCheckResult = {
+    val isInvalid = schema.existsRecursively {
+      case MapType(keyType, _, _) if keyType != StringType => true
+      case _ => false
+    }
+    if (isInvalid) {
+      DataTypeMismatch(
+        errorSubClass = "INVALID_JSON_MAP_KEY_TYPE",
+        messageParameters = Map("schema" -> toSQLType(schema)))
+    } else {
+      TypeCheckSuccess
+    }
   }
 }

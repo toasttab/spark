@@ -20,14 +20,15 @@ package org.apache.spark.sql.types
 import scala.math.{Integral, Numeric, Ordering}
 import scala.reflect.runtime.universe.typeTag
 
-import org.apache.spark.annotation.InterfaceStability
+import org.apache.spark.annotation.Stable
+import org.apache.spark.sql.catalyst.types.{PhysicalByteType, PhysicalDataType}
 
 /**
  * The data type representing `Byte` values. Please use the singleton `DataTypes.ByteType`.
  *
  * @since 1.3.0
  */
-@InterfaceStability.Stable
+@Stable
 class ByteType private() extends IntegralType {
   // The companion object and this class is separated so the companion object also subclasses
   // this type. Otherwise, the companion object would be of type "ByteType$" in byte code.
@@ -37,11 +38,14 @@ class ByteType private() extends IntegralType {
   private[sql] val numeric = implicitly[Numeric[Byte]]
   private[sql] val integral = implicitly[Integral[Byte]]
   private[sql] val ordering = implicitly[Ordering[InternalType]]
+  override private[sql] val exactNumeric = ByteExactNumeric
 
   /**
    * The default size of a value of the ByteType is 1 byte.
    */
   override def defaultSize: Int = 1
+
+  private[sql] override def physicalDataType: PhysicalDataType = PhysicalByteType
 
   override def simpleString: String = "tinyint"
 
@@ -52,5 +56,5 @@ class ByteType private() extends IntegralType {
 /**
  * @since 1.3.0
  */
-@InterfaceStability.Stable
+@Stable
 case object ByteType extends ByteType

@@ -20,19 +20,24 @@ package org.apache.spark.sql.types
 import scala.math.Ordering
 import scala.reflect.runtime.universe.typeTag
 
-import org.apache.spark.annotation.InterfaceStability
+import org.apache.spark.annotation.Stable
+import org.apache.spark.sql.catalyst.types.{PhysicalDataType, PhysicalLongType}
 
 /**
- * The data type representing `java.sql.Timestamp` values.
- * Please use the singleton `DataTypes.TimestampType`.
+ * The timestamp type represents a time instant in microsecond precision.
+ * Valid range is [0001-01-01T00:00:00.000000Z, 9999-12-31T23:59:59.999999Z] where
+ * the left/right-bound is a date and time of the proleptic Gregorian
+ * calendar in UTC+00:00.
  *
+ * Please use the singleton `DataTypes.TimestampType` to refer the type.
  * @since 1.3.0
  */
-@InterfaceStability.Stable
-class TimestampType private() extends AtomicType {
-  // The companion object and this class is separated so the companion object also subclasses
-  // this type. Otherwise, the companion object would be of type "TimestampType$" in byte code.
-  // Defined with a private constructor so the companion object is the only possible instantiation.
+@Stable
+class TimestampType private() extends DatetimeType {
+  /**
+   * Internally, a timestamp is stored as the number of microseconds from
+   * the epoch of 1970-01-01T00:00:00.000000Z (UTC+00:00)
+   */
   private[sql] type InternalType = Long
 
   @transient private[sql] lazy val tag = typeTag[InternalType]
@@ -44,11 +49,18 @@ class TimestampType private() extends AtomicType {
    */
   override def defaultSize: Int = 8
 
+  private[sql] override def physicalDataType: PhysicalDataType = PhysicalLongType
+
   private[spark] override def asNullable: TimestampType = this
 }
 
 /**
+ * The companion case object and its class is separated so the companion object also subclasses
+ * the TimestampType class. Otherwise, the companion object would be of type "TimestampType$"
+ * in byte code. Defined with a private constructor so the companion object is the only possible
+ * instantiation.
+ *
  * @since 1.3.0
  */
-@InterfaceStability.Stable
+@Stable
 case object TimestampType extends TimestampType

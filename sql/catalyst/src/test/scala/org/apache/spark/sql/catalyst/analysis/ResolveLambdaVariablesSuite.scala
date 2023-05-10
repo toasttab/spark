@@ -32,12 +32,12 @@ class ResolveLambdaVariablesSuite extends PlanTest {
   import org.apache.spark.sql.catalyst.dsl.plans._
 
   object Analyzer extends RuleExecutor[LogicalPlan] {
-    val batches = Batch("Resolution", FixedPoint(4), ResolveLambdaVariables(conf)) :: Nil
+    val batches = Batch("Resolution", FixedPoint(4), ResolveLambdaVariables) :: Nil
   }
 
-  private val key = 'key.int
-  private val values1 = 'values1.array(IntegerType)
-  private val values2 = 'values2.array(ArrayType(ArrayType(IntegerType)))
+  private val key = $"key".int
+  private val values1 = $"values1".array(IntegerType)
+  private val values2 = $"values2".array(ArrayType(ArrayType(IntegerType)))
   private val data = LocalRelation(Seq(key, values1, values2))
   private val lvInt = NamedLambdaVariable("x", IntegerType, nullable = true)
   private val lvHiddenInt = NamedLambdaVariable("col0", IntegerType, nullable = true)
@@ -49,19 +49,22 @@ class ResolveLambdaVariablesSuite extends PlanTest {
     comparePlans(Analyzer.execute(plan(e1)), plan(e2))
   }
 
+  private def lv(s: Symbol) = UnresolvedNamedLambdaVariable(Seq(s.name))
+
   test("resolution - no op") {
     checkExpression(key, key)
   }
 
   test("resolution - simple") {
-    val in = ArrayTransform(values1, LambdaFunction('x.attr + 1, 'x.attr :: Nil))
+    val in = ArrayTransform(values1, LambdaFunction(lv(Symbol("x")) + 1, lv(Symbol("x")) :: Nil))
     val out = ArrayTransform(values1, LambdaFunction(lvInt + 1, lvInt :: Nil))
     checkExpression(in, out)
   }
 
   test("resolution - nested") {
     val in = ArrayTransform(values2, LambdaFunction(
-      ArrayTransform('x.attr, LambdaFunction('x.attr + 1, 'x.attr :: Nil)), 'x.attr :: Nil))
+      ArrayTransform(lv(Symbol("x")), LambdaFunction(lv(Symbol("x")) + 1, lv(Symbol("x")) :: Nil)),
+      lv(Symbol("x")) :: Nil))
     val out = ArrayTransform(values2, LambdaFunction(
       ArrayTransform(lvArray, LambdaFunction(lvInt + 1, lvInt :: Nil)), lvArray :: Nil))
     checkExpression(in, out)
@@ -75,14 +78,15 @@ class ResolveLambdaVariablesSuite extends PlanTest {
 
   test("fail - name collisions") {
     val p = plan(ArrayTransform(values1,
-      LambdaFunction('x.attr + 'X.attr, 'x.attr :: 'X.attr :: Nil)))
+      LambdaFunction(lv(Symbol("x")) + lv(Symbol("X")), lv(Symbol("x")) :: lv(Symbol("X")) :: Nil)))
     val msg = intercept[AnalysisException](Analyzer.execute(p)).getMessage
     assert(msg.contains("arguments should not have names that are semantically the same"))
   }
 
   test("fail - lambda arguments") {
     val p = plan(ArrayTransform(values1,
-      LambdaFunction('x.attr + 'y.attr + 'z.attr, 'x.attr :: 'y.attr :: 'z.attr :: Nil)))
+      LambdaFunction(lv(Symbol("x")) + lv(Symbol("y")) + lv(Symbol("z")),
+        lv(Symbol("x")) :: lv(Symbol("y")) :: lv(Symbol("z")) :: Nil)))
     val msg = intercept[AnalysisException](Analyzer.execute(p)).getMessage
     assert(msg.contains("does not match the number of arguments expected"))
   }

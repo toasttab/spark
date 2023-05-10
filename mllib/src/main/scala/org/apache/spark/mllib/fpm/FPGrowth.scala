@@ -41,6 +41,7 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.ScalaReflection
 import org.apache.spark.sql.types._
 import org.apache.spark.storage.StorageLevel
+import org.apache.spark.util.collection.Utils
 
 /**
  * Model trained by [[FPGrowth]], which holds frequent itemsets.
@@ -84,8 +85,6 @@ class FPGrowthModel[Item: ClassTag] @Since("2.4.0") (
   override def save(sc: SparkContext, path: String): Unit = {
     FPGrowthModel.SaveLoadV1_0.save(this, path)
   }
-
-  override protected val formatVersion: String = "1.0"
 }
 
 @Since("2.0.0")
@@ -152,10 +151,10 @@ object FPGrowthModel extends Loader[FPGrowthModel[_]] {
 
 /**
  * A parallel FP-growth algorithm to mine frequent itemsets. The algorithm is described in
- * <a href="http://dx.doi.org/10.1145/1454008.1454027">Li et al., PFP: Parallel FP-Growth for Query
+ * <a href="https://doi.org/10.1145/1454008.1454027">Li et al., PFP: Parallel FP-Growth for Query
  * Recommendation</a>. PFP distributes computation in such a way that each worker executes an
  * independent group of mining tasks. The FP-Growth algorithm is described in
- * <a href="http://dx.doi.org/10.1145/335191.335372">Han et al., Mining frequent patterns without
+ * <a href="https://doi.org/10.1145/335191.335372">Han et al., Mining frequent patterns without
  * candidate generation</a>.
  *
  * @param minSupport the minimal support level of the frequent pattern, any pattern that appears
@@ -271,7 +270,7 @@ class FPGrowth private[spark] (
       minCount: Long,
       freqItems: Array[Item],
       partitioner: Partitioner): RDD[FreqItemset[Item]] = {
-    val itemToRank = freqItems.zipWithIndex.toMap
+    val itemToRank = Utils.toMapWithIndex(freqItems)
     data.flatMap { transaction =>
       genCondTransactions(transaction, itemToRank, partitioner)
     }.aggregateByKey(new FPTree[Int], partitioner.numPartitions)(

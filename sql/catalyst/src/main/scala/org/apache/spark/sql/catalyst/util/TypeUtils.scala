@@ -18,27 +18,27 @@
 package org.apache.spark.sql.catalyst.util
 
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
-import org.apache.spark.sql.catalyst.expressions.RowOrdering
+import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.DataTypeMismatch
+import org.apache.spark.sql.catalyst.expressions.{Expression, RowOrdering}
+import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryErrorsBase}
 import org.apache.spark.sql.types._
 
 /**
  * Functions to help with checking for valid data types and value comparison of various types.
  */
-object TypeUtils {
-  def checkForNumericExpr(dt: DataType, caller: String): TypeCheckResult = {
-    if (dt.isInstanceOf[NumericType] || dt == NullType) {
-      TypeCheckResult.TypeCheckSuccess
-    } else {
-      TypeCheckResult.TypeCheckFailure(s"$caller requires numeric types, not ${dt.catalogString}")
-    }
-  }
+object TypeUtils extends QueryErrorsBase {
 
   def checkForOrderingExpr(dt: DataType, caller: String): TypeCheckResult = {
     if (RowOrdering.isOrderable(dt)) {
       TypeCheckResult.TypeCheckSuccess
     } else {
-      TypeCheckResult.TypeCheckFailure(
-        s"$caller does not support ordering on type ${dt.catalogString}")
+      DataTypeMismatch(
+        errorSubClass = "INVALID_ORDERING_TYPE",
+        Map(
+          "functionName" -> toSQLId(caller),
+          "dataType" -> toSQLType(dt)
+        )
+      )
     }
   }
 
@@ -46,15 +46,52 @@ object TypeUtils {
     if (TypeCoercion.haveSameType(types)) {
       TypeCheckResult.TypeCheckSuccess
     } else {
-      return TypeCheckResult.TypeCheckFailure(
-        s"input to $caller should all be the same type, but it's " +
-          types.map(_.catalogString).mkString("[", ", ", "]"))
+      DataTypeMismatch(
+        errorSubClass = "DATA_DIFF_TYPES",
+        messageParameters = Map(
+          "functionName" -> toSQLId(caller),
+          "dataType" -> types.map(toSQLType).mkString("(", " or ", ")")
+        )
+      )
     }
   }
 
-  def getNumeric(t: DataType): Numeric[Any] =
-    t.asInstanceOf[NumericType].numeric.asInstanceOf[Numeric[Any]]
+  def checkForMapKeyType(keyType: DataType): TypeCheckResult = {
+    if (keyType.existsRecursively(_.isInstanceOf[MapType])) {
+      DataTypeMismatch(
+        errorSubClass = "INVALID_MAP_KEY_TYPE",
+        messageParameters = Map(
+          "keyType" -> toSQLType(keyType)
+        )
+      )
+    } else {
+      TypeCheckResult.TypeCheckSuccess
+    }
+  }
 
+  def checkForAnsiIntervalOrNumericType(input: Expression): TypeCheckResult = input.dataType match {
+    case _: AnsiIntervalType | NullType =>
+      TypeCheckResult.TypeCheckSuccess
+    case dt if dt.isInstanceOf[NumericType] => TypeCheckResult.TypeCheckSuccess
+    case other =>
+      DataTypeMismatch(
+        errorSubClass = "UNEXPECTED_INPUT_TYPE",
+        messageParameters = Map(
+          "paramIndex" -> "1",
+          "requiredType" -> Seq(NumericType, AnsiIntervalType).map(toSQLType).mkString(" or "),
+          "inputSql" -> toSQLExpr(input),
+          "inputType" -> toSQLType(other)))
+  }
+
+  def getNumeric(t: DataType, exactNumericRequired: Boolean = false): Numeric[Any] = {
+    if (exactNumericRequired) {
+      t.asInstanceOf[NumericType].exactNumeric.asInstanceOf[Numeric[Any]]
+    } else {
+      t.asInstanceOf[NumericType].numeric.asInstanceOf[Numeric[Any]]
+    }
+  }
+
+  @scala.annotation.tailrec
   def getInterpretedOrdering(t: DataType): Ordering[Any] = {
     t match {
       case i: AtomicType => i.ordering.asInstanceOf[Ordering[Any]]
@@ -62,16 +99,6 @@ object TypeUtils {
       case s: StructType => s.interpretedOrdering.asInstanceOf[Ordering[Any]]
       case udt: UserDefinedType[_] => getInterpretedOrdering(udt.sqlType)
     }
-  }
-
-  def compareBinary(x: Array[Byte], y: Array[Byte]): Int = {
-    for (i <- 0 until x.length; if i < y.length) {
-      val v1 = x(i) & 0xff
-      val v2 = y(i) & 0xff
-      val res = v1 - v2
-      if (res != 0) return res
-    }
-    x.length - y.length
   }
 
   /**
@@ -83,5 +110,20 @@ object TypeUtils {
     case BinaryType => false
     case _: AtomicType => true
     case _ => false
+  }
+
+  def failWithIntervalType(dataType: DataType): Unit = {
+    invokeOnceForInterval(dataType, forbidAnsiIntervals = false) {
+      throw QueryCompilationErrors.cannotUseIntervalTypeInTableSchemaError()
+    }
+  }
+
+  def invokeOnceForInterval(dataType: DataType, forbidAnsiIntervals: Boolean)(f: => Unit): Unit = {
+    def isInterval(dataType: DataType): Boolean = dataType match {
+      case _: AnsiIntervalType => forbidAnsiIntervals
+      case CalendarIntervalType => true
+      case _ => false
+    }
+    if (dataType.existsRecursively(isInterval)) f
   }
 }

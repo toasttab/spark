@@ -2,12 +2,11 @@
 Write primitive arrays in dataset
 ================================================================================================
 
-Java HotSpot(TM) 64-Bit Server VM 1.8.0_131-b11 on Mac OS X 10.13.6
-Intel(R) Core(TM) i7-6820HQ CPU @ 2.70GHz
-
-Write an array in Dataset:               Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
-------------------------------------------------------------------------------------------------
-Int                                            437 /  529         19.2          52.1       1.0X
-Double                                         638 /  670         13.1          76.1       0.7X
+OpenJDK 64-Bit Server VM 1.8.0_352-b08 on Linux 5.15.0-1023-azure
+Intel(R) Xeon(R) Platinum 8272CL CPU @ 2.60GHz
+Write an array in Dataset:                Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
+------------------------------------------------------------------------------------------------------------------------
+Int                                                 388            418          24         21.6          46.3       1.0X
+Double                                              518            562          36         16.2          61.8       0.7X
 
 

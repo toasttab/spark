@@ -14,181 +14,203 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import functools
+import os
+from typing import Any, Callable, Optional, Sequence, TYPE_CHECKING, cast, TypeVar
 
-import py4j
+from py4j.java_collections import JavaArray
+from py4j.java_gateway import (
+    JavaClass,
+    JavaGateway,
+    JavaObject,
+)
 
+from pyspark import SparkContext
 
-class CapturedException(Exception):
-    def __init__(self, desc, stackTrace):
-        self.desc = desc
-        self.stackTrace = stackTrace
+# For backward compatibility.
+from pyspark.errors import (  # noqa: F401
+    AnalysisException,
+    ParseException,
+    IllegalArgumentException,
+    StreamingQueryException,
+    QueryExecutionException,
+    PythonException,
+    UnknownException,
+    SparkUpgradeException,
+)
+from pyspark.errors.exceptions.captured import CapturedException  # noqa: F401
+from pyspark.find_spark_home import _find_spark_home
 
-    def __str__(self):
-        return repr(self.desc)
+if TYPE_CHECKING:
+    from pyspark.sql.session import SparkSession
+    from pyspark.sql.dataframe import DataFrame
 
+has_numpy = False
+try:
+    import numpy as np  # noqa: F401
 
-class AnalysisException(CapturedException):
-    """
-    Failed to analyze a SQL query plan.
-    """
-
-
-class ParseException(CapturedException):
-    """
-    Failed to parse a SQL command.
-    """
-
-
-class IllegalArgumentException(CapturedException):
-    """
-    Passed an illegal or inappropriate argument.
-    """
-
-
-class StreamingQueryException(CapturedException):
-    """
-    Exception that stopped a :class:`StreamingQuery`.
-    """
-
-
-class QueryExecutionException(CapturedException):
-    """
-    Failed to execute a query.
-    """
+    has_numpy = True
+except ImportError:
+    pass
 
 
-def capture_sql_exception(f):
-    def deco(*a, **kw):
-        try:
-            return f(*a, **kw)
-        except py4j.protocol.Py4JJavaError as e:
-            s = e.java_exception.toString()
-            stackTrace = '\n\t at '.join(map(lambda x: x.toString(),
-                                             e.java_exception.getStackTrace()))
-            if s.startswith('org.apache.spark.sql.AnalysisException: '):
-                raise AnalysisException(s.split(': ', 1)[1], stackTrace)
-            if s.startswith('org.apache.spark.sql.catalyst.analysis'):
-                raise AnalysisException(s.split(': ', 1)[1], stackTrace)
-            if s.startswith('org.apache.spark.sql.catalyst.parser.ParseException: '):
-                raise ParseException(s.split(': ', 1)[1], stackTrace)
-            if s.startswith('org.apache.spark.sql.streaming.StreamingQueryException: '):
-                raise StreamingQueryException(s.split(': ', 1)[1], stackTrace)
-            if s.startswith('org.apache.spark.sql.execution.QueryExecutionException: '):
-                raise QueryExecutionException(s.split(': ', 1)[1], stackTrace)
-            if s.startswith('java.lang.IllegalArgumentException: '):
-                raise IllegalArgumentException(s.split(': ', 1)[1], stackTrace)
-            raise
-    return deco
+FuncT = TypeVar("FuncT", bound=Callable[..., Any])
 
 
-def install_exception_handler():
-    """
-    Hook an exception handler into Py4j, which could capture some SQL exceptions in Java.
-
-    When calling Java API, it will call `get_return_value` to parse the returned object.
-    If any exception happened in JVM, the result will be Java exception object, it raise
-    py4j.protocol.Py4JJavaError. We replace the original `get_return_value` with one that
-    could capture the Java exception and throw a Python one (with the same error message).
-
-    It's idempotent, could be called multiple times.
-    """
-    original = py4j.protocol.get_return_value
-    # The original `get_return_value` is not patched, it's idempotent.
-    patched = capture_sql_exception(original)
-    # only patch the one used in py4j.java_gateway (call Java API)
-    py4j.java_gateway.get_return_value = patched
-
-
-def toJArray(gateway, jtype, arr):
+def toJArray(gateway: JavaGateway, jtype: JavaClass, arr: Sequence[Any]) -> JavaArray:
     """
     Convert python list to java type array
-    :param gateway: Py4j Gateway
-    :param jtype: java type of element in array
-    :param arr: python type list
+
+    Parameters
+    ----------
+    gateway :
+        Py4j Gateway
+    jtype :
+        java type of element in array
+    arr :
+        python type list
     """
-    jarr = gateway.new_array(jtype, len(arr))
+    jarray: JavaArray = gateway.new_array(jtype, len(arr))
     for i in range(0, len(arr)):
-        jarr[i] = arr[i]
-    return jarr
+        jarray[i] = arr[i]
+    return jarray
 
 
-def require_minimum_pandas_version():
-    """ Raise ImportError if minimum version of Pandas is not installed
-    """
-    # TODO(HyukjinKwon): Relocate and deduplicate the version specification.
-    minimum_pandas_version = "0.19.2"
-
-    from distutils.version import LooseVersion
-    try:
-        import pandas
-        have_pandas = True
-    except ImportError:
-        have_pandas = False
-    if not have_pandas:
-        raise ImportError("Pandas >= %s must be installed; however, "
-                          "it was not found." % minimum_pandas_version)
-    if LooseVersion(pandas.__version__) < LooseVersion(minimum_pandas_version):
-        raise ImportError("Pandas >= %s must be installed; however, "
-                          "your version was %s." % (minimum_pandas_version, pandas.__version__))
-
-
-def require_minimum_pyarrow_version():
-    """ Raise ImportError if minimum version of pyarrow is not installed
-    """
-    # TODO(HyukjinKwon): Relocate and deduplicate the version specification.
-    minimum_pyarrow_version = "0.8.0"
-
-    from distutils.version import LooseVersion
-    try:
-        import pyarrow
-        have_arrow = True
-    except ImportError:
-        have_arrow = False
-    if not have_arrow:
-        raise ImportError("PyArrow >= %s must be installed; however, "
-                          "it was not found." % minimum_pyarrow_version)
-    if LooseVersion(pyarrow.__version__) < LooseVersion(minimum_pyarrow_version):
-        raise ImportError("PyArrow >= %s must be installed; however, "
-                          "your version was %s." % (minimum_pyarrow_version, pyarrow.__version__))
-
-
-def require_test_compiled():
-    """ Raise Exception if test classes are not compiled
-    """
+def require_test_compiled() -> None:
+    """Raise Exception if test classes are not compiled"""
     import os
     import glob
-    try:
-        spark_home = os.environ['SPARK_HOME']
-    except KeyError:
-        raise RuntimeError('SPARK_HOME is not defined in environment')
 
-    test_class_path = os.path.join(
-        spark_home, 'sql', 'core', 'target', '*', 'test-classes')
+    test_class_path = os.path.join(_find_spark_home(), "sql", "core", "target", "*", "test-classes")
     paths = glob.glob(test_class_path)
 
     if len(paths) == 0:
         raise RuntimeError(
-            "%s doesn't exist. Spark sql test classes are not compiled." % test_class_path)
+            "%s doesn't exist. Spark sql test classes are not compiled." % test_class_path
+        )
 
 
-class ForeachBatchFunction(object):
+class ForeachBatchFunction:
     """
     This is the Python implementation of Java interface 'ForeachBatchFunction'. This wraps
     the user-defined 'foreachBatch' function such that it can be called from the JVM when
     the query is active.
     """
 
-    def __init__(self, sql_ctx, func):
-        self.sql_ctx = sql_ctx
+    def __init__(self, session: "SparkSession", func: Callable[["DataFrame", int], None]):
         self.func = func
+        self.session = session
 
-    def call(self, jdf, batch_id):
+    def call(self, jdf: JavaObject, batch_id: int) -> None:
         from pyspark.sql.dataframe import DataFrame
+        from pyspark.sql.session import SparkSession
+
         try:
-            self.func(DataFrame(jdf, self.sql_ctx), batch_id)
+            session_jdf = jdf.sparkSession()
+            # assuming that spark context is still the same between JVM and PySpark
+            wrapped_session_jdf = SparkSession(self.session.sparkContext, session_jdf)
+            self.func(DataFrame(jdf, wrapped_session_jdf), batch_id)
         except Exception as e:
             self.error = e
             raise e
 
     class Java:
-        implements = ['org.apache.spark.sql.execution.streaming.sources.PythonForeachBatchFunction']
+        implements = ["org.apache.spark.sql.execution.streaming.sources.PythonForeachBatchFunction"]
+
+
+def to_str(value: Any) -> Optional[str]:
+    """
+    A wrapper over str(), but converts bool values to lower case strings.
+    If None is given, just returns None, instead of converting it to string "None".
+    """
+    if isinstance(value, bool):
+        return str(value).lower()
+    elif value is None:
+        return value
+    else:
+        return str(value)
+
+
+def is_timestamp_ntz_preferred() -> bool:
+    """
+    Return a bool if TimestampNTZType is preferred according to the SQL configuration set.
+    """
+    jvm = SparkContext._jvm
+    return jvm is not None and jvm.PythonSQLUtils.isTimestampNTZPreferred()
+
+
+def is_remote() -> bool:
+    """
+    Returns if the current running environment is for Spark Connect.
+    """
+    return "SPARK_REMOTE" in os.environ
+
+
+def try_remote_functions(f: FuncT) -> FuncT:
+    """Mark API supported from Spark Connect."""
+
+    @functools.wraps(f)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+
+        if is_remote() and "PYSPARK_NO_NAMESPACE_SHARE" not in os.environ:
+            from pyspark.sql.connect import functions
+
+            return getattr(functions, f.__name__)(*args, **kwargs)
+        else:
+            return f(*args, **kwargs)
+
+    return cast(FuncT, wrapped)
+
+
+def try_remote_window(f: FuncT) -> FuncT:
+    """Mark API supported from Spark Connect."""
+
+    @functools.wraps(f)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+
+        if is_remote() and "PYSPARK_NO_NAMESPACE_SHARE" not in os.environ:
+            from pyspark.sql.connect.window import Window
+
+            return getattr(Window, f.__name__)(*args, **kwargs)
+        else:
+            return f(*args, **kwargs)
+
+    return cast(FuncT, wrapped)
+
+
+def try_remote_windowspec(f: FuncT) -> FuncT:
+    """Mark API supported from Spark Connect."""
+
+    @functools.wraps(f)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+
+        if is_remote() and "PYSPARK_NO_NAMESPACE_SHARE" not in os.environ:
+            from pyspark.sql.connect.window import WindowSpec
+
+            return getattr(WindowSpec, f.__name__)(*args, **kwargs)
+        else:
+            return f(*args, **kwargs)
+
+    return cast(FuncT, wrapped)
+
+
+def get_active_spark_context() -> SparkContext:
+    """Raise RuntimeError if SparkContext is not initialized,
+    otherwise, returns the active SparkContext."""
+    sc = SparkContext._active_spark_context
+    if sc is None or sc._jvm is None:
+        raise RuntimeError("SparkContext or SparkSession should be created first.")
+    return sc
+
+
+def try_remote_observation(f: FuncT) -> FuncT:
+    """Mark API supported from Spark Connect."""
+
+    @functools.wraps(f)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        # TODO(SPARK-41527): Add the support of Observation.
+        if is_remote() and "PYSPARK_NO_NAMESPACE_SHARE" not in os.environ:
+            raise NotImplementedError()
+        return f(*args, **kwargs)
+
+    return cast(FuncT, wrapped)

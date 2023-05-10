@@ -20,15 +20,16 @@ package org.apache.spark.sql.hive.orc
 import java.io.IOException
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.Path
+import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.hadoop.hive.ql.io.orc.{OrcFile, Reader}
 import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector
 
-import org.apache.spark.SparkException
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
+import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.util.ThreadUtils
 
 private[hive] object OrcFileOperator extends Logging {
   /**
@@ -79,7 +80,7 @@ private[hive] object OrcFileOperator extends Logging {
             logWarning(s"Skipped the footer in the corrupted file: $path", e)
             None
           } else {
-            throw new SparkException(s"Could not read footer for file: $path", e)
+            throw QueryExecutionErrors.cannotReadFooterForFileError(path, e)
           }
       }
       path -> reader
@@ -92,13 +93,31 @@ private[hive] object OrcFileOperator extends Logging {
       : Option[StructType] = {
     // Take the first file where we can open a valid reader if we can find one.  Otherwise just
     // return None to indicate we can't infer the schema.
-    paths.toIterator.map(getFileReader(_, conf, ignoreCorruptFiles)).collectFirst {
+    paths.iterator.map(getFileReader(_, conf, ignoreCorruptFiles)).collectFirst {
       case Some(reader) =>
         val readerInspector = reader.getObjectInspector.asInstanceOf[StructObjectInspector]
         val schema = readerInspector.getTypeName
         logDebug(s"Reading schema from file $paths, got Hive schema string: $schema")
         CatalystSqlParser.parseDataType(schema).asInstanceOf[StructType]
     }
+  }
+
+  /**
+   * Reads ORC file schemas in multi-threaded manner, using Hive ORC library.
+   * This is visible for testing.
+   */
+  def readOrcSchemasInParallel(
+      partFiles: Seq[FileStatus], conf: Configuration, ignoreCorruptFiles: Boolean)
+      : Seq[StructType] = {
+    ThreadUtils.parmap(partFiles, "readingOrcSchemas", 8) { currentFile =>
+      val file = currentFile.getPath.toString
+      getFileReader(file, Some(conf), ignoreCorruptFiles).map(reader => {
+        val readerInspector = reader.getObjectInspector.asInstanceOf[StructObjectInspector]
+        val schema = readerInspector.getTypeName
+        logDebug(s"Reading schema from file $file., got Hive schema string: $schema")
+        CatalystSqlParser.parseDataType(schema).asInstanceOf[StructType]
+      })
+    }.flatten
   }
 
   def getObjectInspector(

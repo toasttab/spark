@@ -46,10 +46,9 @@ import static org.apache.spark.unsafe.Platform.BYTE_ARRAY_OFFSET;
 /**
  * An Unsafe implementation of Row which is backed by raw memory instead of Java objects.
  *
- * Each tuple has three parts: [null bit set] [values] [variable length portion]
+ * Each tuple has three parts: [null-tracking bit set] [values] [variable length portion]
  *
- * The bit set is used for null tracking and is aligned to 8-byte word boundaries.  It stores
- * one bit per field.
+ * The null-tracking bit set is aligned to 8-byte word boundaries. It stores one bit per field.
  *
  * In the `values` region, we store one 8-byte word per field. For fields that hold fixed-length
  * primitive types, such as long, double, or int, we store the value directly in the word. For
@@ -76,11 +75,11 @@ public final class UnsafeRow extends InternalRow implements Externalizable, Kryo
    */
   public static final Set<DataType> mutableFieldTypes;
 
-  // DecimalType is also mutable
+  // DecimalType, DayTimeIntervalType and YearMonthIntervalType are also mutable
   static {
     mutableFieldTypes = Collections.unmodifiableSet(
       new HashSet<>(
-        Arrays.asList(new DataType[] {
+        Arrays.asList(
           NullType,
           BooleanType,
           ByteType,
@@ -90,20 +89,32 @@ public final class UnsafeRow extends InternalRow implements Externalizable, Kryo
           FloatType,
           DoubleType,
           DateType,
-          TimestampType
-        })));
+          TimestampType,
+          TimestampNTZType
+        )));
   }
 
   public static boolean isFixedLength(DataType dt) {
+    if (dt instanceof UserDefinedType) {
+      return isFixedLength(((UserDefinedType) dt).sqlType());
+    }
+
     if (dt instanceof DecimalType) {
       return ((DecimalType) dt).precision() <= Decimal.MAX_LONG_DIGITS();
     } else {
-      return mutableFieldTypes.contains(dt);
+      return dt instanceof DayTimeIntervalType || dt instanceof YearMonthIntervalType ||
+        mutableFieldTypes.contains(dt);
     }
   }
 
   public static boolean isMutable(DataType dt) {
-    return mutableFieldTypes.contains(dt) || dt instanceof DecimalType;
+    if (dt instanceof UserDefinedType) {
+      return isMutable(((UserDefinedType) dt).sqlType());
+    }
+
+    return mutableFieldTypes.contains(dt) || dt instanceof DecimalType ||
+      dt instanceof CalendarIntervalType || dt instanceof DayTimeIntervalType ||
+      dt instanceof YearMonthIntervalType;
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -224,9 +235,6 @@ public final class UnsafeRow extends InternalRow implements Externalizable, Kryo
   public void setDouble(int ordinal, double value) {
     assertIndexIsValid(ordinal);
     setNotNullAt(ordinal);
-    if (Double.isNaN(value)) {
-      value = Double.NaN;
-    }
     Platform.putDouble(baseObject, getFieldOffset(ordinal), value);
   }
 
@@ -255,9 +263,6 @@ public final class UnsafeRow extends InternalRow implements Externalizable, Kryo
   public void setFloat(int ordinal, float value) {
     assertIndexIsValid(ordinal);
     setNotNullAt(ordinal);
-    if (Float.isNaN(value)) {
-      value = Float.NaN;
-    }
     Platform.putFloat(baseObject, getFieldOffset(ordinal), value);
   }
 
@@ -285,7 +290,7 @@ public final class UnsafeRow extends InternalRow implements Externalizable, Kryo
       Platform.putLong(baseObject, baseOffset + cursor, 0L);
       Platform.putLong(baseObject, baseOffset + cursor + 8, 0L);
 
-      if (value == null) {
+      if (value == null || !value.changePrecision(precision, value.scale())) {
         setNullAt(ordinal);
         // keep the offset for future update
         Platform.putLong(baseObject, getFieldOffset(ordinal), cursor << 32);
@@ -304,47 +309,29 @@ public final class UnsafeRow extends InternalRow implements Externalizable, Kryo
   }
 
   @Override
-  public Object get(int ordinal, DataType dataType) {
-    if (isNullAt(ordinal) || dataType instanceof NullType) {
-      return null;
-    } else if (dataType instanceof BooleanType) {
-      return getBoolean(ordinal);
-    } else if (dataType instanceof ByteType) {
-      return getByte(ordinal);
-    } else if (dataType instanceof ShortType) {
-      return getShort(ordinal);
-    } else if (dataType instanceof IntegerType) {
-      return getInt(ordinal);
-    } else if (dataType instanceof LongType) {
-      return getLong(ordinal);
-    } else if (dataType instanceof FloatType) {
-      return getFloat(ordinal);
-    } else if (dataType instanceof DoubleType) {
-      return getDouble(ordinal);
-    } else if (dataType instanceof DecimalType) {
-      DecimalType dt = (DecimalType) dataType;
-      return getDecimal(ordinal, dt.precision(), dt.scale());
-    } else if (dataType instanceof DateType) {
-      return getInt(ordinal);
-    } else if (dataType instanceof TimestampType) {
-      return getLong(ordinal);
-    } else if (dataType instanceof BinaryType) {
-      return getBinary(ordinal);
-    } else if (dataType instanceof StringType) {
-      return getUTF8String(ordinal);
-    } else if (dataType instanceof CalendarIntervalType) {
-      return getInterval(ordinal);
-    } else if (dataType instanceof StructType) {
-      return getStruct(ordinal, ((StructType) dataType).size());
-    } else if (dataType instanceof ArrayType) {
-      return getArray(ordinal);
-    } else if (dataType instanceof MapType) {
-      return getMap(ordinal);
-    } else if (dataType instanceof UserDefinedType) {
-      return get(ordinal, ((UserDefinedType)dataType).sqlType());
+  public void setInterval(int ordinal, CalendarInterval value) {
+    assertIndexIsValid(ordinal);
+    long cursor = getLong(ordinal) >>> 32;
+    assert cursor > 0 : "invalid cursor " + cursor;
+    if (value == null) {
+      setNullAt(ordinal);
+      // zero-out the bytes
+      Platform.putLong(baseObject, baseOffset + cursor, 0L);
+      Platform.putLong(baseObject, baseOffset + cursor + 8, 0L);
+      // keep the offset for future update
+      Platform.putLong(baseObject, getFieldOffset(ordinal), (cursor << 32) | 16L);
     } else {
-      throw new UnsupportedOperationException("Unsupported data type " + dataType.simpleString());
+      long longVal =
+        ((long) value.months & 0xFFFFFFFFL) | (((long) value.days << 32) & 0xFFFFFFFF00000000L);
+      Platform.putLong(baseObject, baseOffset + cursor, longVal);
+      Platform.putLong(baseObject, baseOffset + cursor + 8, value.microseconds);
+      setLong(ordinal, (cursor << 32) | 16L);
     }
+  }
+
+  @Override
+  public Object get(int ordinal, DataType dataType) {
+    return SpecializedGettersReader.read(this, ordinal, dataType, true, true);
   }
 
   @Override
@@ -446,9 +433,11 @@ public final class UnsafeRow extends InternalRow implements Externalizable, Kryo
     } else {
       final long offsetAndSize = getLong(ordinal);
       final int offset = (int) (offsetAndSize >> 32);
-      final int months = (int) Platform.getLong(baseObject, baseOffset + offset);
+      final long monthAndDays = Platform.getLong(baseObject, baseOffset + offset);
+      final int months = (int) (0xFFFFFFFFL & monthAndDays);
+      final int days = (int) ((0xFFFFFFFF00000000L & monthAndDays) >> 32);
       final long microseconds = Platform.getLong(baseObject, baseOffset + offset + 8);
-      return new CalendarInterval(months, microseconds);
+      return new CalendarInterval(months, days, microseconds);
     }
   }
 
@@ -586,14 +575,7 @@ public final class UnsafeRow extends InternalRow implements Externalizable, Kryo
    * Returns the underlying bytes for this UnsafeRow.
    */
   public byte[] getBytes() {
-    if (baseObject instanceof byte[] && baseOffset == Platform.BYTE_ARRAY_OFFSET
-      && (((byte[]) baseObject).length == sizeInBytes)) {
-      return (byte[]) baseObject;
-    } else {
-      byte[] bytes = new byte[sizeInBytes];
-      Platform.copyMemory(baseObject, baseOffset, bytes, Platform.BYTE_ARRAY_OFFSET, sizeInBytes);
-      return bytes;
-    }
+    return UnsafeDataUtils.getBytes(baseObject, baseOffset, sizeInBytes);
   }
 
   // This is for debugging

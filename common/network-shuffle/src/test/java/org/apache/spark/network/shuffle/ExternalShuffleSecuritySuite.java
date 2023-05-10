@@ -41,14 +41,14 @@ public class ExternalShuffleSecuritySuite {
 
   TransportConf conf = new TransportConf("shuffle", MapConfigProvider.EMPTY);
   TransportServer server;
+  TransportContext transportContext;
 
   @Before
   public void beforeEach() throws IOException {
-    TransportContext context =
-      new TransportContext(conf, new ExternalShuffleBlockHandler(conf, null));
+    transportContext = new TransportContext(conf, new ExternalBlockHandler(conf, null));
     TransportServerBootstrap bootstrap = new SaslServerBootstrap(conf,
         new TestSecretKeyHolder("my-app-id", "secret"));
-    this.server = context.createServer(Arrays.asList(bootstrap));
+    this.server = transportContext.createServer(Arrays.asList(bootstrap));
   }
 
   @After
@@ -56,6 +56,10 @@ public class ExternalShuffleSecuritySuite {
     if (server != null) {
       server.close();
       server = null;
+    }
+    if (transportContext != null) {
+      transportContext.close();
+      transportContext = null;
     }
   }
 
@@ -66,20 +70,16 @@ public class ExternalShuffleSecuritySuite {
 
   @Test
   public void testBadAppId() {
-    try {
-      validate("wrong-app-id", "secret", false);
-    } catch (Exception e) {
-      assertTrue(e.getMessage(), e.getMessage().contains("Wrong appId!"));
-    }
+    Exception e = assertThrows(Exception.class,
+      () -> validate("wrong-app-id", "secret", false));
+    assertTrue(e.getMessage(), e.getMessage().contains("Wrong appId!"));
   }
 
   @Test
   public void testBadSecret() {
-    try {
-      validate("my-app-id", "bad-secret", false);
-    } catch (Exception e) {
-      assertTrue(e.getMessage(), e.getMessage().contains("Mismatched response"));
-    }
+    Exception e = assertThrows(Exception.class,
+      () -> validate("my-app-id", "bad-secret", false));
+    assertTrue(e.getMessage(), e.getMessage().contains("Mismatched response"));
   }
 
   @Test
@@ -87,7 +87,7 @@ public class ExternalShuffleSecuritySuite {
     validate("my-app-id", "secret", true);
   }
 
-  /** Creates an ExternalShuffleClient and attempts to register with the server. */
+  /** Creates an ExternalBlockStoreClient and attempts to register with the server. */
   private void validate(String appId, String secretKey, boolean encrypt)
         throws IOException, InterruptedException {
     TransportConf testConf = conf;
@@ -96,8 +96,8 @@ public class ExternalShuffleSecuritySuite {
         ImmutableMap.of("spark.authenticate.enableSaslEncryption", "true")));
     }
 
-    try (ExternalShuffleClient client =
-        new ExternalShuffleClient(
+    try (ExternalBlockStoreClient client =
+        new ExternalBlockStoreClient(
           testConf, new TestSecretKeyHolder(appId, secretKey), true, 5000)) {
       client.init(appId);
       // Registration either succeeds or throws an exception.

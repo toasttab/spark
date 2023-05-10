@@ -28,6 +28,7 @@ class AppStatusUtilsSuite extends SparkFunSuite {
       taskId = 0,
       index = 0,
       attempt = 0,
+      partitionId = 0,
       launchTime = new Date(1L),
       resultFetchStart = None,
       duration = Some(100L),
@@ -52,13 +53,17 @@ class AppStatusUtilsSuite extends SparkFunSuite {
         inputMetrics = null,
         outputMetrics = null,
         shuffleReadMetrics = null,
-        shuffleWriteMetrics = null)))
+        shuffleWriteMetrics = null)),
+      executorLogs = null,
+      schedulerDelay = 0L,
+      gettingResultTime = 0L)
     assert(AppStatusUtils.schedulerDelay(runningTask) === 0L)
 
     val finishedTask = new TaskData(
       taskId = 0,
       index = 0,
       attempt = 0,
+      partitionId = 0,
       launchTime = new Date(1L),
       resultFetchStart = None,
       duration = Some(100L),
@@ -83,7 +88,10 @@ class AppStatusUtilsSuite extends SparkFunSuite {
         inputMetrics = null,
         outputMetrics = null,
         shuffleReadMetrics = null,
-        shuffleWriteMetrics = null)))
+        shuffleWriteMetrics = null)),
+      executorLogs = null,
+      schedulerDelay = 0L,
+      gettingResultTime = 0L)
     assert(AppStatusUtils.schedulerDelay(finishedTask) === 3L)
   }
 }

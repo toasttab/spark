@@ -28,15 +28,14 @@ import com.google.common.collect.MapMaker
 
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.config.Tests.TEST_USE_COMPRESSED_OOPS_KEY
 import org.apache.spark.util.collection.OpenHashSet
 
 /**
  * A trait that allows a class to give [[SizeEstimator]] more accurate size estimation.
- * When a class extends it, [[SizeEstimator]] will query the `estimatedSize` first.
- * If `estimatedSize` does not return [[None]], [[SizeEstimator]] will use the returned size
- * as the size of the object. Otherwise, [[SizeEstimator]] will do the estimation work.
- * The difference between a [[KnownSizeEstimation]] and
- * [[org.apache.spark.util.collection.SizeTracker]] is that, a
+ * When a class extends it, [[SizeEstimator]] will query the `estimatedSize`, and use
+ * the returned size as the size of the object. The difference between a [[KnownSizeEstimation]]
+ * and [[org.apache.spark.util.collection.SizeTracker]] is that, a
  * [[org.apache.spark.util.collection.SizeTracker]] still uses [[SizeEstimator]] to
  * estimate the size. However, a [[KnownSizeEstimation]] can provide a better estimation without
  * using [[SizeEstimator]].
@@ -51,7 +50,7 @@ private[spark] trait KnownSizeEstimation {
  * memory-aware caches.
  *
  * Based on the following JavaWorld article:
- * http://www.javaworld.com/javaworld/javaqa/2003-12/02-qa-1226-sizeof.html
+ * https://www.infoworld.com/article/2077408/sizeof-for-java.html
  */
 @DeveloperApi
 object SizeEstimator extends Logging {
@@ -106,7 +105,7 @@ object SizeEstimator extends Logging {
 
   // Sets object size, pointer size based on architecture and CompressedOops settings
   // from the JVM.
-  private def initialize() {
+  private def initialize(): Unit = {
     val arch = System.getProperty("os.arch")
     is64bit = arch.contains("64") || arch.contains("s390x")
     isCompressedOops = getIsCompressedOops
@@ -126,12 +125,13 @@ object SizeEstimator extends Logging {
   private def getIsCompressedOops: Boolean = {
     // This is only used by tests to override the detection of compressed oops. The test
     // actually uses a system property instead of a SparkConf, so we'll stick with that.
-    if (System.getProperty("spark.test.useCompressedOops") != null) {
-      return System.getProperty("spark.test.useCompressedOops").toBoolean
+    if (System.getProperty(TEST_USE_COMPRESSED_OOPS_KEY) != null) {
+      return System.getProperty(TEST_USE_COMPRESSED_OOPS_KEY).toBoolean
     }
 
-    // java.vm.info provides compressed ref info for IBM JDKs
-    if (System.getProperty("java.vendor").contains("IBM")) {
+    // java.vm.info provides compressed ref info for IBM and OpenJ9 JDKs
+    val javaVendor = System.getProperty("java.vendor")
+    if (javaVendor.contains("IBM") || javaVendor.contains("OpenJ9")) {
       return System.getProperty("java.vm.info").contains("Compressed Ref")
     }
 
@@ -156,7 +156,7 @@ object SizeEstimator extends Logging {
         val guess = Runtime.getRuntime.maxMemory < (32L*1024*1024*1024)
         val guessInWords = if (guess) "yes" else "not"
         logWarning("Failed to check whether UseCompressedOops is set; assuming " + guessInWords)
-        return guess
+        guess
     }
   }
 
@@ -169,7 +169,7 @@ object SizeEstimator extends Logging {
     val stack = new ArrayBuffer[AnyRef]
     var size = 0L
 
-    def enqueue(obj: AnyRef) {
+    def enqueue(obj: AnyRef): Unit = {
       if (obj != null && !visited.containsKey(obj)) {
         visited.put(obj, null)
         stack += obj
@@ -203,7 +203,7 @@ object SizeEstimator extends Logging {
     state.size
   }
 
-  private def visitSingleObject(obj: AnyRef, state: SearchState) {
+  private def visitSingleObject(obj: AnyRef, state: SearchState): Unit = {
     val cls = obj.getClass
     if (cls.isArray) {
       visitArray(obj, cls, state)
@@ -232,7 +232,7 @@ object SizeEstimator extends Logging {
   private val ARRAY_SIZE_FOR_SAMPLING = 400
   private val ARRAY_SAMPLE_SIZE = 100 // should be lower than ARRAY_SIZE_FOR_SAMPLING
 
-  private def visitArray(array: AnyRef, arrayClass: Class[_], state: SearchState) {
+  private def visitArray(array: AnyRef, arrayClass: Class[_], state: SearchState): Unit = {
     val length = ScalaRunTime.array_length(array)
     val elementClass = arrayClass.getComponentType()
 
@@ -262,7 +262,7 @@ object SizeEstimator extends Logging {
         val s2 = sampleArray(array, state, rand, drawn, length)
         val size = math.min(s1, s2)
         state.size += math.max(s1, s2) +
-          (size * ((length - ARRAY_SAMPLE_SIZE) / (ARRAY_SAMPLE_SIZE))).toLong
+          (size * ((length - ARRAY_SAMPLE_SIZE) / ARRAY_SAMPLE_SIZE))
       }
     }
   }
@@ -282,7 +282,7 @@ object SizeEstimator extends Logging {
       drawn.add(index)
       val obj = ScalaRunTime.array_apply(array, index).asInstanceOf[AnyRef]
       if (obj != null) {
-        size += SizeEstimator.estimate(obj, state.visited).toLong
+        size += SizeEstimator.estimate(obj, state.visited)
       }
     }
     size
@@ -324,7 +324,7 @@ object SizeEstimator extends Logging {
     val parent = getClassInfo(cls.getSuperclass)
     var shellSize = parent.shellSize
     var pointerFields = parent.pointerFields
-    val sizeCount = Array.fill(fieldSizes.max + 1)(0)
+    val sizeCount = Array.ofDim[Int](fieldSizes.max + 1)
 
     // iterate through the fields of this class and gather information.
     for (field <- cls.getDeclaredFields) {
@@ -333,9 +333,21 @@ object SizeEstimator extends Logging {
         if (fieldClass.isPrimitive) {
           sizeCount(primitiveSize(fieldClass)) += 1
         } else {
-          field.setAccessible(true) // Enable future get()'s on this field
+          // Note: in Java 9+ this would be better with trySetAccessible and canAccess
+          try {
+            field.setAccessible(true) // Enable future get()'s on this field
+            pointerFields = field :: pointerFields
+          } catch {
+            // If the field isn't accessible, we can still record the pointer size
+            // but can't know more about the field, so ignore it
+            case _: SecurityException =>
+              // do nothing
+            // Java 9+ can throw InaccessibleObjectException but the class is Java 9+-only
+            case re: RuntimeException
+                if re.getClass.getSimpleName == "InaccessibleObjectException" =>
+              // do nothing
+          }
           sizeCount(pointerSize) += 1
-          pointerFields = field :: pointerFields
         }
       }
     }

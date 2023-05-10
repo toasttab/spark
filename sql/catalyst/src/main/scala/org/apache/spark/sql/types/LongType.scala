@@ -20,14 +20,15 @@ package org.apache.spark.sql.types
 import scala.math.{Integral, Numeric, Ordering}
 import scala.reflect.runtime.universe.typeTag
 
-import org.apache.spark.annotation.InterfaceStability
+import org.apache.spark.annotation.Stable
+import org.apache.spark.sql.catalyst.types.{PhysicalDataType, PhysicalLongType}
 
 /**
  * The data type representing `Long` values. Please use the singleton `DataTypes.LongType`.
  *
  * @since 1.3.0
  */
-@InterfaceStability.Stable
+@Stable
 class LongType private() extends IntegralType {
   // The companion object and this class is separated so the companion object also subclasses
   // this type. Otherwise, the companion object would be of type "LongType$" in byte code.
@@ -37,11 +38,14 @@ class LongType private() extends IntegralType {
   private[sql] val numeric = implicitly[Numeric[Long]]
   private[sql] val integral = implicitly[Integral[Long]]
   private[sql] val ordering = implicitly[Ordering[InternalType]]
+  override private[sql] val exactNumeric = LongExactNumeric
 
   /**
    * The default size of a value of the LongType is 8 bytes.
    */
   override def defaultSize: Int = 8
+
+  private[sql] override def physicalDataType: PhysicalDataType = PhysicalLongType
 
   override def simpleString: String = "bigint"
 
@@ -51,5 +55,5 @@ class LongType private() extends IntegralType {
 /**
  * @since 1.3.0
  */
-@InterfaceStability.Stable
+@Stable
 case object LongType extends LongType

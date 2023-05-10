@@ -23,18 +23,19 @@ import org.apache.hadoop.mapreduce.{Job, TaskAttemptContext}
 
 import org.apache.spark.TaskContext
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.sql.{AnalysisException, SparkSession}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow
 import org.apache.spark.sql.catalyst.expressions.codegen.UnsafeRowWriter
 import org.apache.spark.sql.catalyst.util.CompressionCodecs
+import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types.{DataType, StringType, StructType}
 import org.apache.spark.util.SerializableConfiguration
 
 /**
- * A data source for reading text files.
+ * A data source for reading text files. The text files must be encoded as UTF-8.
  */
 class TextFileFormat extends TextBasedFileFormat with DataSourceRegister {
 
@@ -44,8 +45,7 @@ class TextFileFormat extends TextBasedFileFormat with DataSourceRegister {
 
   private def verifySchema(schema: StructType): Unit = {
     if (schema.size != 1) {
-      throw new AnalysisException(
-        s"Text data source supports only a single column, and you have ${schema.size} columns.")
+      throw QueryCompilationErrors.textDataSourceWithMultiColumnsError(schema)
     }
   }
 
@@ -137,28 +137,7 @@ class TextFileFormat extends TextBasedFileFormat with DataSourceRegister {
     }
   }
 
-  override def supportDataType(dataType: DataType, isReadPath: Boolean): Boolean =
+  override def supportDataType(dataType: DataType): Boolean =
     dataType == StringType
 }
 
-class TextOutputWriter(
-    path: String,
-    dataSchema: StructType,
-    lineSeparator: Array[Byte],
-    context: TaskAttemptContext)
-  extends OutputWriter {
-
-  private val writer = CodecStreams.createOutputStream(context, new Path(path))
-
-  override def write(row: InternalRow): Unit = {
-    if (!row.isNullAt(0)) {
-      val utf8string = row.getUTF8String(0)
-      utf8string.writeTo(writer)
-    }
-    writer.write(lineSeparator)
-  }
-
-  override def close(): Unit = {
-    writer.close()
-  }
-}

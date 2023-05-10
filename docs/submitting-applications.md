@@ -1,6 +1,21 @@
 ---
 layout: global
 title: Submitting Applications
+license: |
+  Licensed to the Apache Software Foundation (ASF) under one or more
+  contributor license agreements.  See the NOTICE file distributed with
+  this work for additional information regarding copyright ownership.
+  The ASF licenses this file to You under the Apache License, Version 2.0
+  (the "License"); you may not use this file except in compliance with
+  the License.  You may obtain a copy of the License at
+ 
+     http://www.apache.org/licenses/LICENSE-2.0
+ 
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
 ---
 
 The `spark-submit` script in Spark's `bin` directory is used to launch applications on a cluster.
@@ -20,7 +35,8 @@ script as shown here while passing your jar.
 
 For Python, you can use the `--py-files` argument of `spark-submit` to add `.py`, `.zip` or `.egg`
 files to be distributed with your application. If you depend on multiple Python files we recommend
-packaging them into a `.zip` or `.egg`.
+packaging them into a `.zip` or `.egg`. For third-party Python dependencies,
+see [Python Package Management](api/python/user_guide/python_packaging.html).
 
 # Launching Applications with spark-submit
 
@@ -44,7 +60,7 @@ Some of the commonly used options are:
 * `--class`: The entry point for your application (e.g. `org.apache.spark.examples.SparkPi`)
 * `--master`: The [master URL](#master-urls) for the cluster (e.g. `spark://23.195.26.187:7077`)
 * `--deploy-mode`: Whether to deploy your driver on the worker nodes (`cluster`) or locally as an external client (`client`) (default: `client`) <b> &#8224; </b>
-* `--conf`: Arbitrary Spark configuration property in key=value format. For values that contain spaces wrap "key=value" in quotes (as shown).
+* `--conf`: Arbitrary Spark configuration property in key=value format. For values that contain spaces wrap "key=value" in quotes (as shown). Multiple configurations should be passed as separate arguments. (e.g. `--conf <key>=<value> --conf <key2>=<value2>`)
 * `application-jar`: Path to a bundled jar including your application and all dependencies. The URL must be globally visible inside of your cluster, for instance, an `hdfs://` path or a `file://` path that is present on all nodes.
 * `application-arguments`: Arguments passed to the main method of your main class, if any
 
@@ -61,7 +77,7 @@ locally on your laptop), it is common to use `cluster` mode to minimize network 
 the drivers and the executors. Currently, the standalone mode does not support cluster mode for Python
 applications.
 
-For Python applications, simply pass a `.py` file in the place of `<application-jar>` instead of a JAR,
+For Python applications, simply pass a `.py` file in the place of `<application-jar>`,
 and add Python `.zip`, `.egg` or `.py` files to the search path with `--py-files`.
 
 There are a few options available that are specific to the
@@ -99,12 +115,12 @@ run it with `--help`. Here are a few examples of common options:
   /path/to/examples.jar \
   1000
 
-# Run on a YARN cluster
+# Run on a YARN cluster in cluster deploy mode
 export HADOOP_CONF_DIR=XXX
 ./bin/spark-submit \
   --class org.apache.spark.examples.SparkPi \
   --master yarn \
-  --deploy-mode cluster \  # can be client for client mode
+  --deploy-mode cluster \
   --executor-memory 20G \
   --num-executors 50 \
   /path/to/examples.jar \
@@ -147,9 +163,10 @@ The master URL passed to Spark can be in one of the following formats:
 <tr><th>Master URL</th><th>Meaning</th></tr>
 <tr><td> <code>local</code> </td><td> Run Spark locally with one worker thread (i.e. no parallelism at all). </td></tr>
 <tr><td> <code>local[K]</code> </td><td> Run Spark locally with K worker threads (ideally, set this to the number of cores on your machine). </td></tr>
-<tr><td> <code>local[K,F]</code> </td><td> Run Spark locally with K worker threads and F maxFailures (see <a href="configuration.html#scheduling">spark.task.maxFailures</a> for an explanation of this variable) </td></tr>
+<tr><td> <code>local[K,F]</code> </td><td> Run Spark locally with K worker threads and F maxFailures (see <a href="configuration.html#scheduling">spark.task.maxFailures</a> for an explanation of this variable). </td></tr>
 <tr><td> <code>local[*]</code> </td><td> Run Spark locally with as many worker threads as logical cores on your machine.</td></tr>
 <tr><td> <code>local[*,F]</code> </td><td> Run Spark locally with as many worker threads as logical cores on your machine and F maxFailures.</td></tr>
+<tr><td> <code>local-cluster[N,C,M]</code> </td><td> Local-cluster mode is only for unit tests. It emulates a distributed cluster in a single JVM with N number of workers, C cores per worker and M MiB of memory per worker.</td></tr>
 <tr><td> <code>spark://HOST:PORT</code> </td><td> Connect to the given <a href="spark-standalone.html">Spark standalone
         cluster</a> master. The port must be whichever one your master is configured to use, which is 7077 by default.
 </td></tr>
@@ -166,8 +183,8 @@ The master URL passed to Spark can be in one of the following formats:
         The cluster location will be found based on the <code>HADOOP_CONF_DIR</code> or <code>YARN_CONF_DIR</code> variable.
 </td></tr>
 <tr><td> <code>k8s://HOST:PORT</code> </td><td> Connect to a <a href="running-on-kubernetes.html">Kubernetes</a> cluster in
-        <code>cluster</code> mode. Client mode is currently unsupported and will be supported in future releases.
-        The <code>HOST</code> and <code>PORT</code> refer to the [Kubernetes API Server](https://kubernetes.io/docs/reference/generated/kube-apiserver/).
+        <code>client</code> or <code>cluster</code> mode depending on the value of <code>--deploy-mode</code>.
+        The <code>HOST</code> and <code>PORT</code> refer to the <a href="https://kubernetes.io/docs/reference/generated/kube-apiserver/">Kubernetes API Server</a>.
         It connects using TLS by default. In order to force it to use an unsecured connection, you can use
         <code>k8s://http://HOST:PORT</code>.
 </td></tr>

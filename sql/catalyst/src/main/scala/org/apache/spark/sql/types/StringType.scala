@@ -20,7 +20,8 @@ package org.apache.spark.sql.types
 import scala.math.Ordering
 import scala.reflect.runtime.universe.typeTag
 
-import org.apache.spark.annotation.InterfaceStability
+import org.apache.spark.annotation.Stable
+import org.apache.spark.sql.catalyst.types.{PhysicalDataType, PhysicalStringType}
 import org.apache.spark.unsafe.types.UTF8String
 
 /**
@@ -28,7 +29,7 @@ import org.apache.spark.unsafe.types.UTF8String
  *
  * @since 1.3.0
  */
-@InterfaceStability.Stable
+@Stable
 class StringType private() extends AtomicType {
   // The companion object and this class is separated so the companion object also subclasses
   // this type. Otherwise, the companion object would be of type "StringType$" in byte code.
@@ -42,12 +43,14 @@ class StringType private() extends AtomicType {
    */
   override def defaultSize: Int = 20
 
+  private[sql] override def physicalDataType: PhysicalDataType = PhysicalStringType
+
   private[spark] override def asNullable: StringType = this
 }
 
 /**
  * @since 1.3.0
  */
-@InterfaceStability.Stable
+@Stable
 case object StringType extends StringType
 

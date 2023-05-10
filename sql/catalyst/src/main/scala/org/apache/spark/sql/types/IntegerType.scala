@@ -20,14 +20,15 @@ package org.apache.spark.sql.types
 import scala.math.{Integral, Numeric, Ordering}
 import scala.reflect.runtime.universe.typeTag
 
-import org.apache.spark.annotation.InterfaceStability
+import org.apache.spark.annotation.Stable
+import org.apache.spark.sql.catalyst.types.{PhysicalDataType, PhysicalIntegerType}
 
 /**
  * The data type representing `Int` values. Please use the singleton `DataTypes.IntegerType`.
  *
  * @since 1.3.0
  */
-@InterfaceStability.Stable
+@Stable
 class IntegerType private() extends IntegralType {
   // The companion object and this class is separated so the companion object also subclasses
   // this type. Otherwise, the companion object would be of type "IntegerType$" in byte code.
@@ -37,11 +38,14 @@ class IntegerType private() extends IntegralType {
   private[sql] val numeric = implicitly[Numeric[Int]]
   private[sql] val integral = implicitly[Integral[Int]]
   private[sql] val ordering = implicitly[Ordering[InternalType]]
+  override private[sql] val exactNumeric = IntegerExactNumeric
 
   /**
    * The default size of a value of the IntegerType is 4 bytes.
    */
   override def defaultSize: Int = 4
+
+  private[sql] override def physicalDataType: PhysicalDataType = PhysicalIntegerType
 
   override def simpleString: String = "int"
 
@@ -51,5 +55,5 @@ class IntegerType private() extends IntegralType {
 /**
  * @since 1.3.0
  */
-@InterfaceStability.Stable
+@Stable
 case object IntegerType extends IntegerType

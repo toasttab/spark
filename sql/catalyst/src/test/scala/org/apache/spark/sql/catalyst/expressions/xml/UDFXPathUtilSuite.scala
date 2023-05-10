@@ -57,7 +57,7 @@ class UDFXPathUtilSuite extends SparkFunSuite {
   test("boolean eval") {
     var ret =
       util.evalBoolean("<a><b>true</b><b>false</b><b>b3</b><c>c1</c><c>c2</c></a>", "a/b[1]/text()")
-    assert(ret == true)
+    assert(ret)
 
     ret = util.evalBoolean("<a><b>true</b><b>false</b><b>b3</b><c>c1</c><c>c2</c></a>", "a/b[4]")
     assert(ret == false)
@@ -116,6 +116,6 @@ class UDFXPathUtilSuite extends SparkFunSuite {
   test("node list eval") {
     val ret = util.evalNodeList("<a><b>true</b><b>false</b><b>b3</b><c>c1</c><c>-77</c></a>", "a/*")
     assert(ret != null && ret.isInstanceOf[NodeList])
-    assert(ret.asInstanceOf[NodeList].getLength == 5)
+    assert(ret.getLength == 5)
   }
 }

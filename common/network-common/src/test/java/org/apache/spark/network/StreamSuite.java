@@ -24,7 +24,6 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
@@ -51,6 +50,7 @@ public class StreamSuite {
   private static final String[] STREAMS = StreamTestHelper.STREAMS;
   private static StreamTestHelper testData;
 
+  private static TransportContext context;
   private static TransportServer server;
   private static TransportClientFactory clientFactory;
 
@@ -93,7 +93,7 @@ public class StreamSuite {
         return streamManager;
       }
     };
-    TransportContext context = new TransportContext(conf, handler);
+    context = new TransportContext(conf, handler);
     server = context.createServer();
     clientFactory = context.createClientFactory();
   }
@@ -103,53 +103,48 @@ public class StreamSuite {
     server.close();
     clientFactory.close();
     testData.cleanup();
+    context.close();
   }
 
   @Test
   public void testZeroLengthStream() throws Throwable {
-    TransportClient client = clientFactory.createClient(TestUtils.getLocalHost(), server.getPort());
-    try {
+    try (TransportClient client =
+        clientFactory.createClient(TestUtils.getLocalHost(), server.getPort())) {
       StreamTask task = new StreamTask(client, "emptyBuffer", TimeUnit.SECONDS.toMillis(5));
       task.run();
       task.check();
-    } finally {
-      client.close();
     }
   }
 
   @Test
   public void testSingleStream() throws Throwable {
-    TransportClient client = clientFactory.createClient(TestUtils.getLocalHost(), server.getPort());
-    try {
+    try (TransportClient client =
+        clientFactory.createClient(TestUtils.getLocalHost(), server.getPort())) {
       StreamTask task = new StreamTask(client, "largeBuffer", TimeUnit.SECONDS.toMillis(5));
       task.run();
       task.check();
-    } finally {
-      client.close();
     }
   }
 
   @Test
   public void testMultipleStreams() throws Throwable {
-    TransportClient client = clientFactory.createClient(TestUtils.getLocalHost(), server.getPort());
-    try {
+    try (TransportClient client =
+        clientFactory.createClient(TestUtils.getLocalHost(), server.getPort())) {
       for (int i = 0; i < 20; i++) {
         StreamTask task = new StreamTask(client, STREAMS[i % STREAMS.length],
           TimeUnit.SECONDS.toMillis(5));
         task.run();
         task.check();
       }
-    } finally {
-      client.close();
     }
   }
 
   @Test
   public void testConcurrentStreams() throws Throwable {
     ExecutorService executor = Executors.newFixedThreadPool(20);
-    TransportClient client = clientFactory.createClient(TestUtils.getLocalHost(), server.getPort());
 
-    try {
+    try (TransportClient client =
+        clientFactory.createClient(TestUtils.getLocalHost(), server.getPort())) {
       List<StreamTask> tasks = new ArrayList<>();
       for (int i = 0; i < 20; i++) {
         StreamTask task = new StreamTask(client, STREAMS[i % STREAMS.length],
@@ -165,7 +160,6 @@ public class StreamSuite {
       }
     } finally {
       executor.shutdownNow();
-      client.close();
     }
   }
 
@@ -229,7 +223,7 @@ public class StreamSuite {
           byte[] expected = new byte[base.remaining()];
           base.get(expected);
           assertEquals(expected.length, result.length);
-          assertTrue("buffers don't match", Arrays.equals(expected, result));
+          assertArrayEquals("buffers don't match", expected, result);
         }
       } catch (Throwable t) {
         error = t;

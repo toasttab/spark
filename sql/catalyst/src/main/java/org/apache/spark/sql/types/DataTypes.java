@@ -19,7 +19,7 @@ package org.apache.spark.sql.types;
 
 import java.util.*;
 
-import org.apache.spark.annotation.InterfaceStability;
+import org.apache.spark.annotation.Stable;
 
 /**
  * To get/create specific data type, users should use singleton objects and factory methods
@@ -27,7 +27,7 @@ import org.apache.spark.annotation.InterfaceStability;
  *
  * @since 1.3.0
  */
-@InterfaceStability.Stable
+@Stable
 public class DataTypes {
   /**
    * Gets the StringType object.
@@ -53,6 +53,11 @@ public class DataTypes {
    * Gets the TimestampType object.
    */
   public static final DataType TimestampType = TimestampType$.MODULE$;
+
+  /**
+   * Gets the TimestampNTZType object.
+   */
+  public static final DataType TimestampNTZType = TimestampNTZType$.MODULE$;
 
   /**
    * Gets the CalendarIntervalType object.
@@ -128,6 +133,34 @@ public class DataTypes {
    */
   public static DecimalType createDecimalType() {
     return DecimalType$.MODULE$.USER_DEFAULT();
+  }
+
+  /**
+   * Creates a DayTimeIntervalType by specifying the start and end fields.
+   */
+  public static DayTimeIntervalType createDayTimeIntervalType(byte startField, byte endField) {
+    return DayTimeIntervalType$.MODULE$.apply(startField, endField);
+  }
+
+  /**
+   * Creates a DayTimeIntervalType with default start and end fields: interval day to second.
+   */
+  public static DayTimeIntervalType createDayTimeIntervalType() {
+    return DayTimeIntervalType$.MODULE$.DEFAULT();
+  }
+
+  /**
+   * Creates a YearMonthIntervalType by specifying the start and end fields.
+   */
+  public static YearMonthIntervalType createYearMonthIntervalType(byte startField, byte endField) {
+    return YearMonthIntervalType$.MODULE$.apply(startField, endField);
+  }
+
+  /**
+   * Creates a YearMonthIntervalType with default start and end fields: interval year to month.
+   */
+  public static YearMonthIntervalType createYearMonthIntervalType() {
+    return YearMonthIntervalType$.MODULE$.DEFAULT();
   }
 
   /**

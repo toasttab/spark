@@ -26,9 +26,12 @@ import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
+import org.apache.spark.sql.errors.QueryExecutionErrors
+import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{DataType, StructType}
+import org.apache.spark.sql.types.{DataType, LongType, StringType, StructField, StructType, TimestampType}
+import org.apache.spark.unsafe.types.UTF8String
 
 
 /**
@@ -58,6 +61,11 @@ trait FileFormat {
 
   /**
    * Returns whether this format supports returning columnar batch or not.
+   * If columnar batch output is requested, users shall supply
+   * FileFormat.OPTION_RETURNING_BATCH -> true
+   * in relation options when calling buildReaderWithPartitionValues.
+   * This should only be passed as true if it can actually be supported.
+   * For ParquetFileFormat and OrcFileFormat, passing this option is required.
    *
    * TODO: we should just have different traits for the different formats.
    */
@@ -110,7 +118,7 @@ trait FileFormat {
       filters: Seq[Filter],
       options: Map[String, String],
       hadoopConf: Configuration): PartitionedFile => Iterator[InternalRow] = {
-    throw new UnsupportedOperationException(s"buildReader is not supported for $this")
+    throw QueryExecutionErrors.buildReaderUnsupportedForFileFormatError(this.toString)
   }
 
   /**
@@ -132,8 +140,6 @@ trait FileFormat {
     new (PartitionedFile => Iterator[InternalRow]) with Serializable {
       private val fullSchema = requiredSchema.toAttributes ++ partitionSchema.toAttributes
 
-      private val joinedRow = new JoinedRow()
-
       // Using lazy val to avoid serialization
       private lazy val appendPartitionColumns =
         GenerateUnsafeProjection.generate(fullSchema, fullSchema)
@@ -145,8 +151,15 @@ trait FileFormat {
         // Note that we have to apply the converter even though `file.partitionValues` is empty.
         // This is because the converter is also responsible for converting safe `InternalRow`s into
         // `UnsafeRow`s.
-        dataReader(file).map { dataRow =>
-          converter(joinedRow(dataRow, file.partitionValues))
+        if (partitionSchema.isEmpty) {
+          dataReader(file).map { dataRow =>
+            converter(dataRow)
+          }
+        } else {
+          val joinedRow = new JoinedRow()
+          dataReader(file).map { dataRow =>
+            converter(joinedRow(dataRow, file.partitionValues))
+          }
         }
       }
     }
@@ -156,7 +169,114 @@ trait FileFormat {
    * Returns whether this format supports the given [[DataType]] in read/write path.
    * By default all data types are supported.
    */
-  def supportDataType(dataType: DataType, isReadPath: Boolean): Boolean = true
+  def supportDataType(dataType: DataType): Boolean = true
+
+  /**
+   * Returns whether this format supports the given filed name in read/write path.
+   * By default all field name is supported.
+   */
+  def supportFieldName(name: String): Boolean = true
+}
+
+object FileFormat {
+
+  val FILE_PATH = "file_path"
+
+  val FILE_NAME = "file_name"
+
+  val FILE_BLOCK_START = "file_block_start"
+
+  val FILE_BLOCK_LENGTH = "file_block_length"
+
+  val FILE_SIZE = "file_size"
+
+  val FILE_MODIFICATION_TIME = "file_modification_time"
+
+  val ROW_INDEX = "row_index"
+
+  // A name for a temporary column that holds row indexes computed by the file format reader
+  // until they can be placed in the _metadata struct.
+  val ROW_INDEX_TEMPORARY_COLUMN_NAME = s"_tmp_metadata_$ROW_INDEX"
+
+  val METADATA_NAME = "_metadata"
+
+  /**
+   * Option to pass to buildReaderWithPartitionValues to return columnar batch output or not.
+   * For ParquetFileFormat and OrcFileFormat, passing this option is required.
+   * This should only be passed as true if it can actually be supported, which can be checked
+   * by calling supportBatch.
+   */
+  val OPTION_RETURNING_BATCH = "returning_batch"
+
+  /**
+   * Schema of metadata struct that can be produced by every file format,
+   * metadata fields for every file format must be *not* nullable.
+   * */
+  val BASE_METADATA_STRUCT: StructType = new StructType()
+    .add(StructField(FileFormat.FILE_PATH, StringType, nullable = false))
+    .add(StructField(FileFormat.FILE_NAME, StringType, nullable = false))
+    .add(StructField(FileFormat.FILE_SIZE, LongType, nullable = false))
+    .add(StructField(FileFormat.FILE_BLOCK_START, LongType, nullable = false))
+    .add(StructField(FileFormat.FILE_BLOCK_LENGTH, LongType, nullable = false))
+    .add(StructField(FileFormat.FILE_MODIFICATION_TIME, TimestampType, nullable = false))
+
+  /**
+   * Create a file metadata struct column containing fields supported by the given file format.
+   */
+  def createFileMetadataCol(fileFormat: FileFormat): AttributeReference = {
+    val struct = if (fileFormat.isInstanceOf[ParquetFileFormat]) {
+      BASE_METADATA_STRUCT.add(StructField(FileFormat.ROW_INDEX, LongType, nullable = false))
+    } else {
+      BASE_METADATA_STRUCT
+    }
+    FileSourceMetadataAttribute(FileFormat.METADATA_NAME, struct)
+  }
+
+  // create an internal row given required metadata fields and file information
+  def createMetadataInternalRow(
+      fieldNames: Seq[String],
+      filePath: Path,
+      fileSize: Long,
+      fileModificationTime: Long): InternalRow = {
+    // We are not aware of `FILE_BLOCK_START` and `FILE_BLOCK_LENGTH` before splitting files
+    assert(!fieldNames.contains(FILE_BLOCK_START) && !fieldNames.contains(FILE_BLOCK_LENGTH))
+    updateMetadataInternalRow(new GenericInternalRow(fieldNames.length), fieldNames,
+      filePath, fileSize, 0L, fileSize, fileModificationTime)
+  }
+
+  // update an internal row given required metadata fields and file information
+  def updateMetadataInternalRow(
+      row: InternalRow,
+      fieldNames: Seq[String],
+      filePath: Path,
+      fileSize: Long,
+      fileBlockStart: Long,
+      fileBlockLength: Long,
+      fileModificationTime: Long): InternalRow = {
+    fieldNames.zipWithIndex.foreach { case (name, i) =>
+      name match {
+        case FILE_PATH =>
+          // Use `new Path(Path.toString)` as a form of canonicalization
+          val pathString = new Path(filePath.toString).toUri.toString
+          row.update(i, UTF8String.fromString(pathString))
+        case FILE_NAME =>
+          val fileName = filePath.toUri.getRawPath.split("/").lastOption.getOrElse("")
+          row.update(i, UTF8String.fromString(fileName))
+        case FILE_SIZE => row.update(i, fileSize)
+        case FILE_BLOCK_START => row.update(i, fileBlockStart)
+        case FILE_BLOCK_LENGTH => row.update(i, fileBlockLength)
+        case FILE_MODIFICATION_TIME =>
+          // the modificationTime from the file is in millisecond,
+          // while internally, the TimestampType `file_modification_time` is stored in microsecond
+          row.update(i, fileModificationTime * 1000L)
+        case ROW_INDEX =>
+          // Do nothing. Only the metadata fields that have identical values for each row of the
+          // file are set by this function, while fields that have different values (such as row
+          // index) are set separately.
+      }
+    }
+    row
+  }
 }
 
 /**

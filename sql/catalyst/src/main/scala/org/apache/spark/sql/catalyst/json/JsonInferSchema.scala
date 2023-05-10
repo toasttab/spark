@@ -17,20 +17,53 @@
 
 package org.apache.spark.sql.catalyst.json
 
+import java.io.CharConversionException
+import java.nio.charset.MalformedInputException
 import java.util.Comparator
+
+import scala.util.control.Exception.allCatch
 
 import com.fasterxml.jackson.core._
 
-import org.apache.spark.SparkException
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.analysis.TypeCoercion
+import org.apache.spark.sql.catalyst.expressions.ExprUtils
 import org.apache.spark.sql.catalyst.json.JacksonUtils.nextUntil
-import org.apache.spark.sql.catalyst.util.{DropMalformedMode, FailFastMode, ParseMode, PermissiveMode}
+import org.apache.spark.sql.catalyst.util._
+import org.apache.spark.sql.catalyst.util.LegacyDateFormats.FAST_DATE_FORMAT
+import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.util.Utils
 
-private[sql] object JsonInferSchema {
+private[sql] class JsonInferSchema(options: JSONOptions) extends Serializable {
+
+  private val decimalParser = ExprUtils.getDecimalParser(options.locale)
+
+  private val timestampFormatter = TimestampFormatter(
+    options.timestampFormatInRead,
+    options.zoneId,
+    options.locale,
+    legacyFormat = FAST_DATE_FORMAT,
+    isParsing = true)
+  private val timestampNTZFormatter = TimestampFormatter(
+    options.timestampNTZFormatInRead,
+    options.zoneId,
+    legacyFormat = FAST_DATE_FORMAT,
+    isParsing = true,
+    forTimestampNTZ = true)
+
+  private def handleJsonErrorsByParseMode(parseMode: ParseMode,
+      columnNameOfCorruptRecord: String, e: Throwable): Option[StructType] = {
+    parseMode match {
+      case PermissiveMode =>
+        Some(StructType(Array(StructField(columnNameOfCorruptRecord, StringType))))
+      case DropMalformedMode =>
+        None
+      case FailFastMode =>
+        throw QueryExecutionErrors.malformedRecordsDetectedInSchemaInferenceError(e)
+    }
+  }
 
   /**
    * Infer the type of a collection of json records in three stages:
@@ -40,34 +73,34 @@ private[sql] object JsonInferSchema {
    */
   def infer[T](
       json: RDD[T],
-      configOptions: JSONOptions,
       createParser: (JsonFactory, T) => JsonParser): StructType = {
-    val parseMode = configOptions.parseMode
-    val columnNameOfCorruptRecord = configOptions.columnNameOfCorruptRecord
+    val parseMode = options.parseMode
+    val columnNameOfCorruptRecord = options.columnNameOfCorruptRecord
 
     // In each RDD partition, perform schema inference on each row and merge afterwards.
-    val typeMerger = compatibleRootType(columnNameOfCorruptRecord, parseMode)
+    val typeMerger = JsonInferSchema.compatibleRootType(columnNameOfCorruptRecord, parseMode)
     val mergedTypesFromPartitions = json.mapPartitions { iter =>
-      val factory = new JsonFactory()
-      configOptions.setJacksonOptions(factory)
+      val factory = options.buildJsonFactory()
       iter.flatMap { row =>
         try {
           Utils.tryWithResource(createParser(factory, row)) { parser =>
             parser.nextToken()
-            Some(inferField(parser, configOptions))
+            Some(inferField(parser))
           }
         } catch {
-          case  e @ (_: RuntimeException | _: JsonProcessingException) => parseMode match {
-            case PermissiveMode =>
-              Some(StructType(Seq(StructField(columnNameOfCorruptRecord, StringType))))
-            case DropMalformedMode =>
-              None
-            case FailFastMode =>
-              throw new SparkException("Malformed records are detected in schema inference. " +
-                s"Parse Mode: ${FailFastMode.name}.", e)
-          }
+          case e @ (_: RuntimeException | _: JsonProcessingException |
+                    _: MalformedInputException) =>
+            handleJsonErrorsByParseMode(parseMode, columnNameOfCorruptRecord, e)
+          case e: CharConversionException if options.encoding.isEmpty =>
+            val msg =
+              """JSON parser cannot handle a character in its input.
+                |Specifying encoding as an input option explicitly might help to resolve the issue.
+                |""".stripMargin + e.getMessage
+            val wrappedCharException = new CharConversionException(msg)
+            wrappedCharException.initCause(e)
+            handleJsonErrorsByParseMode(parseMode, columnNameOfCorruptRecord, wrappedCharException)
         }
-      }.reduceOption(typeMerger).toIterator
+      }.reduceOption(typeMerger).iterator
     }
 
     // Here we manually submit a fold-like Spark job, so that we can set the SQLConf when running
@@ -82,42 +115,23 @@ private[sql] object JsonInferSchema {
     }
     json.sparkContext.runJob(mergedTypesFromPartitions, foldPartition, mergeResult)
 
-    canonicalizeType(rootType, configOptions) match {
-      case Some(st: StructType) => st
-      case _ =>
-        // canonicalizeType erases all empty structs, including the only one we want to keep
-        StructType(Nil)
-    }
-  }
-
-  private[this] val structFieldComparator = new Comparator[StructField] {
-    override def compare(o1: StructField, o2: StructField): Int = {
-      o1.name.compareTo(o2.name)
-    }
-  }
-
-  private def isSorted(arr: Array[StructField]): Boolean = {
-    var i: Int = 0
-    while (i < arr.length - 1) {
-      if (structFieldComparator.compare(arr(i), arr(i + 1)) > 0) {
-        return false
-      }
-      i += 1
-    }
-    true
+    canonicalizeType(rootType, options)
+      .find(_.isInstanceOf[StructType])
+      // canonicalizeType erases all empty structs, including the only one we want to keep
+      .getOrElse(StructType(Nil)).asInstanceOf[StructType]
   }
 
   /**
    * Infer the type of a json document from the parser's token stream
    */
-  def inferField(parser: JsonParser, configOptions: JSONOptions): DataType = {
+  def inferField(parser: JsonParser): DataType = {
     import com.fasterxml.jackson.core.JsonToken._
     parser.getCurrentToken match {
       case null | VALUE_NULL => NullType
 
       case FIELD_NAME =>
         parser.nextToken()
-        inferField(parser, configOptions)
+        inferField(parser)
 
       case VALUE_STRING if parser.getTextLength < 1 =>
         // Zero length strings and nulls have special handling to deal
@@ -128,18 +142,35 @@ private[sql] object JsonInferSchema {
         // record fields' types have been combined.
         NullType
 
-      case VALUE_STRING => StringType
+      case VALUE_STRING =>
+        val field = parser.getText
+        lazy val decimalTry = allCatch opt {
+          val bigDecimal = decimalParser(field)
+            DecimalType(bigDecimal.precision, bigDecimal.scale)
+        }
+        if (options.prefersDecimal && decimalTry.isDefined) {
+          decimalTry.get
+        } else if (options.inferTimestamp &&
+            timestampNTZFormatter.parseWithoutTimeZoneOptional(field, false).isDefined) {
+          SQLConf.get.timestampType
+        } else if (options.inferTimestamp &&
+            timestampFormatter.parseOptional(field).isDefined) {
+          TimestampType
+        } else {
+          StringType
+        }
+
       case START_OBJECT =>
         val builder = Array.newBuilder[StructField]
         while (nextUntil(parser, END_OBJECT)) {
           builder += StructField(
             parser.getCurrentName,
-            inferField(parser, configOptions),
+            inferField(parser),
             nullable = true)
         }
         val fields: Array[StructField] = builder.result()
         // Note: other code relies on this sorting for correctness, so don't remove it!
-        java.util.Arrays.sort(fields, structFieldComparator)
+        java.util.Arrays.sort(fields, JsonInferSchema.structFieldComparator)
         StructType(fields)
 
       case START_ARRAY =>
@@ -148,15 +179,15 @@ private[sql] object JsonInferSchema {
         // the type as we pass through all JSON objects.
         var elementType: DataType = NullType
         while (nextUntil(parser, END_ARRAY)) {
-          elementType = compatibleType(
-            elementType, inferField(parser, configOptions))
+          elementType = JsonInferSchema.compatibleType(
+            elementType, inferField(parser))
         }
 
         ArrayType(elementType)
 
-      case (VALUE_NUMBER_INT | VALUE_NUMBER_FLOAT) if configOptions.primitivesAsString => StringType
+      case (VALUE_NUMBER_INT | VALUE_NUMBER_FLOAT) if options.primitivesAsString => StringType
 
-      case (VALUE_TRUE | VALUE_FALSE) if configOptions.primitivesAsString => StringType
+      case (VALUE_TRUE | VALUE_FALSE) if options.primitivesAsString => StringType
 
       case VALUE_NUMBER_INT | VALUE_NUMBER_FLOAT =>
         import JsonParser.NumberType._
@@ -172,7 +203,7 @@ private[sql] object JsonInferSchema {
             } else {
               DoubleType
             }
-          case FLOAT | DOUBLE if configOptions.prefersDecimal =>
+          case FLOAT | DOUBLE if options.prefersDecimal =>
             val v = parser.getDecimalValue
             if (Math.max(v.precision(), v.scale()) <= DecimalType.MAX_PRECISION) {
               DecimalType(Math.max(v.precision(), v.scale()), v.scale())
@@ -184,6 +215,9 @@ private[sql] object JsonInferSchema {
         }
 
       case VALUE_TRUE | VALUE_FALSE => BooleanType
+
+      case _ =>
+        throw QueryExecutionErrors.malformedJSONError()
     }
   }
 
@@ -191,7 +225,8 @@ private[sql] object JsonInferSchema {
    * Recursively canonicalizes inferred types, e.g., removes StructTypes with no fields,
    * drops NullTypes or converts them to StringType based on provided options.
    */
-  private def canonicalizeType(tpe: DataType, options: JSONOptions): Option[DataType] = tpe match {
+  private[catalyst] def canonicalizeType(
+      tpe: DataType, options: JSONOptions): Option[DataType] = tpe match {
     case at: ArrayType =>
       canonicalizeType(at.elementType, options)
         .map(t => at.copy(elementType = t))
@@ -217,12 +252,31 @@ private[sql] object JsonInferSchema {
 
     case other => Some(other)
   }
+}
 
-  private def withCorruptField(
+object JsonInferSchema {
+  val structFieldComparator = new Comparator[StructField] {
+    override def compare(o1: StructField, o2: StructField): Int = {
+      o1.name.compareTo(o2.name)
+    }
+  }
+
+  def isSorted(arr: Array[StructField]): Boolean = {
+    var i: Int = 0
+    while (i < arr.length - 1) {
+      if (structFieldComparator.compare(arr(i), arr(i + 1)) > 0) {
+        return false
+      }
+      i += 1
+    }
+    true
+  }
+
+  def withCorruptField(
       struct: StructType,
       other: DataType,
       columnNameOfCorruptRecords: String,
-      parseMode: ParseMode) = parseMode match {
+      parseMode: ParseMode): StructType = parseMode match {
     case PermissiveMode =>
       // If we see any other data type at the root level, we get records that cannot be
       // parsed. So, we use the struct as the data type and add the corrupt field to the schema.
@@ -230,7 +284,7 @@ private[sql] object JsonInferSchema {
         // If this given struct does not have a column used for corrupt records,
         // add this field.
         val newFields: Array[StructField] =
-          StructField(columnNameOfCorruptRecords, StringType, nullable = true) +: struct.fields
+        StructField(columnNameOfCorruptRecords, StringType, nullable = true) +: struct.fields
         // Note: other code relies on this sorting for correctness, so don't remove it!
         java.util.Arrays.sort(newFields, structFieldComparator)
         StructType(newFields)
@@ -245,15 +299,13 @@ private[sql] object JsonInferSchema {
 
     case FailFastMode =>
       // If `other` is not struct type, consider it as malformed one and throws an exception.
-      throw new SparkException("Malformed records are detected in schema inference. " +
-        s"Parse Mode: ${FailFastMode.name}. Reasons: Failed to infer a common schema. " +
-        s"Struct types are expected, but `${other.catalogString}` was found.")
+      throw QueryExecutionErrors.malformedRecordsDetectedInSchemaInferenceError(other)
   }
 
   /**
    * Remove top-level ArrayType wrappers and merge the remaining schemas
    */
-  private def compatibleRootType(
+  def compatibleRootType(
       columnNameOfCorruptRecords: String,
       parseMode: ParseMode): (DataType, DataType) => DataType = {
     // Since we support array of json objects at the top level,
@@ -349,6 +401,9 @@ private[sql] object JsonInferSchema {
           compatibleType(DecimalType.forType(t1), t2)
         case (t1: DecimalType, t2: IntegralType) =>
           compatibleType(t1, DecimalType.forType(t2))
+
+        case (TimestampNTZType, TimestampType) | (TimestampType, TimestampNTZType) =>
+          TimestampType
 
         // strings and every string is a Json object.
         case (_, _) => StringType

@@ -21,7 +21,7 @@ import java.{lang => jl, util => ju}
 
 import scala.collection.JavaConverters._
 
-import org.apache.spark.annotation.InterfaceStability
+import org.apache.spark.annotation.Stable
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.stat._
 import org.apache.spark.sql.functions.col
@@ -33,7 +33,7 @@ import org.apache.spark.util.sketch.{BloomFilter, CountMinSketch}
  *
  * @since 1.4.0
  */
-@InterfaceStability.Stable
+@Stable
 final class DataFrameStatFunctions private[sql](df: DataFrame) {
 
   /**
@@ -51,7 +51,7 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
    *
    * This method implements a variation of the Greenwald-Khanna algorithm (with some speed
    * optimizations).
-   * The algorithm was first present in <a href="http://dx.doi.org/10.1145/375663.375670">
+   * The algorithm was first present in <a href="https://doi.org/10.1145/375663.375670">
    * Space-efficient Online Computation of Quantile Summaries</a> by Greenwald and Khanna.
    *
    * @param col the name of the numerical column
@@ -181,8 +181,6 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
 
   /**
    * Computes a pair-wise frequency table of the given columns. Also known as a contingency table.
-   * The number of distinct values for each column should be less than 1e4. At most 1e6 non-zero
-   * pair frequencies will be returned.
    * The first column of each row will be the distinct values of `col1` and the column names will
    * be the distinct values of `col2`. The name of the first column will be `col1_col2`. Counts
    * will be returned as `Long`s. Pairs that have no occurrences will have zero as their counts.
@@ -218,7 +216,7 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
   /**
    * Finding frequent items for columns, possibly with false positives. Using the
    * frequent element count algorithm described in
-   * <a href="http://dx.doi.org/10.1145/762471.762473">here</a>, proposed by Karp,
+   * <a href="https://doi.org/10.1145/762471.762473">here</a>, proposed by Karp,
    * Schenker, and Papadimitriou.
    * The `support` should be greater than 1e-4.
    *
@@ -265,7 +263,7 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
   /**
    * Finding frequent items for columns, possibly with false positives. Using the
    * frequent element count algorithm described in
-   * <a href="http://dx.doi.org/10.1145/762471.762473">here</a>, proposed by Karp,
+   * <a href="https://doi.org/10.1145/762471.762473">here</a>, proposed by Karp,
    * Schenker, and Papadimitriou.
    * Uses a `default` support of 1%.
    *
@@ -284,7 +282,7 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
   /**
    * (Scala-specific) Finding frequent items for columns, possibly with false positives. Using the
    * frequent element count algorithm described in
-   * <a href="http://dx.doi.org/10.1145/762471.762473">here</a>, proposed by Karp, Schenker,
+   * <a href="https://doi.org/10.1145/762471.762473">here</a>, proposed by Karp, Schenker,
    * and Papadimitriou.
    *
    * This function is meant for exploratory data analysis, as we make no guarantee about the
@@ -328,7 +326,7 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
   /**
    * (Scala-specific) Finding frequent items for columns, possibly with false positives. Using the
    * frequent element count algorithm described in
-   * <a href="http://dx.doi.org/10.1145/762471.762473">here</a>, proposed by Karp, Schenker,
+   * <a href="https://doi.org/10.1145/762471.762473">here</a>, proposed by Karp, Schenker,
    * and Papadimitriou.
    * Uses a `default` support of 1%.
    *
@@ -537,7 +535,7 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
    * @since 2.0.0
    */
   def bloomFilter(colName: String, expectedNumItems: Long, fpp: Double): BloomFilter = {
-    buildBloomFilter(Column(colName), BloomFilter.create(expectedNumItems, fpp))
+    buildBloomFilter(Column(colName), expectedNumItems, -1L, fpp)
   }
 
   /**
@@ -549,7 +547,7 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
    * @since 2.0.0
    */
   def bloomFilter(col: Column, expectedNumItems: Long, fpp: Double): BloomFilter = {
-    buildBloomFilter(col, BloomFilter.create(expectedNumItems, fpp))
+    buildBloomFilter(col, expectedNumItems, -1L, fpp)
   }
 
   /**
@@ -561,7 +559,7 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
    * @since 2.0.0
    */
   def bloomFilter(colName: String, expectedNumItems: Long, numBits: Long): BloomFilter = {
-    buildBloomFilter(Column(colName), BloomFilter.create(expectedNumItems, numBits))
+    buildBloomFilter(Column(colName), expectedNumItems, numBits, Double.NaN)
   }
 
   /**
@@ -573,10 +571,12 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
    * @since 2.0.0
    */
   def bloomFilter(col: Column, expectedNumItems: Long, numBits: Long): BloomFilter = {
-    buildBloomFilter(col, BloomFilter.create(expectedNumItems, numBits))
+    buildBloomFilter(col, expectedNumItems, numBits, Double.NaN)
   }
 
-  private def buildBloomFilter(col: Column, zero: BloomFilter): BloomFilter = {
+  private def buildBloomFilter(col: Column, expectedNumItems: Long,
+                               numBits: Long,
+                               fpp: Double): BloomFilter = {
     val singleCol = df.select(col)
     val colType = singleCol.schema.head.dataType
 
@@ -598,12 +598,30 @@ final class DataFrameStatFunctions private[sql](df: DataFrame) {
         )
     }
 
-    singleCol.queryExecution.toRdd.treeAggregate(zero)(
+    singleCol.queryExecution.toRdd.treeAggregate(null.asInstanceOf[BloomFilter])(
       (filter: BloomFilter, row: InternalRow) => {
-        updater(filter, row)
-        filter
+        val theFilter =
+          if (filter == null) {
+            if (fpp.isNaN) {
+              BloomFilter.create(expectedNumItems, numBits)
+            } else {
+              BloomFilter.create(expectedNumItems, fpp)
+            }
+          } else {
+            filter
+          }
+        updater(theFilter, row)
+        theFilter
       },
-      (filter1, filter2) => filter1.mergeInPlace(filter2)
+      (filter1, filter2) => {
+        if (filter1 == null) {
+          filter2
+        } else if (filter2 == null) {
+          filter1
+        } else {
+          filter1.mergeInPlace(filter2)
+        }
+      }
     )
   }
 }

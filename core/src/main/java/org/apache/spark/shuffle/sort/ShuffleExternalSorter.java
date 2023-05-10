@@ -21,7 +21,9 @@ import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.util.LinkedList;
+import java.util.zip.Checksum;
 
+import org.apache.spark.SparkException;
 import scala.Tuple2;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -38,6 +40,8 @@ import org.apache.spark.memory.TaskMemoryManager;
 import org.apache.spark.memory.TooLargePageException;
 import org.apache.spark.serializer.DummySerializerInstance;
 import org.apache.spark.serializer.SerializerInstance;
+import org.apache.spark.shuffle.ShuffleWriteMetricsReporter;
+import org.apache.spark.shuffle.checksum.ShuffleChecksumSupport;
 import org.apache.spark.storage.BlockManager;
 import org.apache.spark.storage.DiskBlockObjectWriter;
 import org.apache.spark.storage.FileSegment;
@@ -64,7 +68,7 @@ import org.apache.spark.util.Utils;
  * spill files. Instead, this merging is performed in {@link UnsafeShuffleWriter}, which uses a
  * specialized merge procedure that avoids extra serialization/deserialization.
  */
-final class ShuffleExternalSorter extends MemoryConsumer {
+final class ShuffleExternalSorter extends MemoryConsumer implements ShuffleChecksumSupport {
 
   private static final Logger logger = LoggerFactory.getLogger(ShuffleExternalSorter.class);
 
@@ -75,7 +79,7 @@ final class ShuffleExternalSorter extends MemoryConsumer {
   private final TaskMemoryManager taskMemoryManager;
   private final BlockManager blockManager;
   private final TaskContext taskContext;
-  private final ShuffleWriteMetrics writeMetrics;
+  private final ShuffleWriteMetricsReporter writeMetrics;
 
   /**
    * Force this sorter to spill when there are this many elements in memory.
@@ -106,6 +110,9 @@ final class ShuffleExternalSorter extends MemoryConsumer {
   @Nullable private MemoryBlock currentPage = null;
   private long pageCursor = -1;
 
+  // Checksum calculator for each partition. Empty when shuffle checksum disabled.
+  private final Checksum[] partitionChecksums;
+
   ShuffleExternalSorter(
       TaskMemoryManager memoryManager,
       BlockManager blockManager,
@@ -113,7 +120,7 @@ final class ShuffleExternalSorter extends MemoryConsumer {
       int initialSize,
       int numPartitions,
       SparkConf conf,
-      ShuffleWriteMetrics writeMetrics) {
+      ShuffleWriteMetricsReporter writeMetrics) throws SparkException {
     super(memoryManager,
       (int) Math.min(PackedRecordPointer.MAXIMUM_PAGE_SIZE_BYTES, memoryManager.pageSizeBytes()),
       memoryManager.getTungstenMemoryMode());
@@ -128,10 +135,15 @@ final class ShuffleExternalSorter extends MemoryConsumer {
         (int) conf.get(package$.MODULE$.SHUFFLE_SPILL_NUM_ELEMENTS_FORCE_SPILL_THRESHOLD());
     this.writeMetrics = writeMetrics;
     this.inMemSorter = new ShuffleInMemorySorter(
-      this, initialSize, conf.getBoolean("spark.shuffle.sort.useRadixSort", true));
+      this, initialSize, (boolean) conf.get(package$.MODULE$.SHUFFLE_SORT_USE_RADIXSORT()));
     this.peakMemoryUsedBytes = getMemoryUsage();
     this.diskWriteBufferSize =
         (int) (long) conf.get(package$.MODULE$.SHUFFLE_DISK_WRITE_BUFFER_SIZE());
+    this.partitionChecksums = createPartitionChecksums(numPartitions, conf);
+  }
+
+  public long[] getChecksums() {
+    return getChecksumValues(partitionChecksums);
   }
 
   /**
@@ -144,7 +156,16 @@ final class ShuffleExternalSorter extends MemoryConsumer {
    */
   private void writeSortedFile(boolean isLastFile) {
 
-    final ShuffleWriteMetrics writeMetricsToUse;
+    // This call performs the actual sort.
+    final ShuffleInMemorySorter.ShuffleSorterIterator sortedRecords =
+      inMemSorter.getSortedIterator();
+
+    // If there are no sorted records, so we don't need to create an empty spill file.
+    if (!sortedRecords.hasNext()) {
+      return;
+    }
+
+    final ShuffleWriteMetricsReporter writeMetricsToUse;
 
     if (isLastFile) {
       // We're writing the final non-spill file, so we _do_ want to count this as shuffle bytes.
@@ -155,10 +176,6 @@ final class ShuffleExternalSorter extends MemoryConsumer {
       // them towards shuffle bytes written.
       writeMetricsToUse = new ShuffleWriteMetrics();
     }
-
-    // This call performs the actual sort.
-    final ShuffleInMemorySorter.ShuffleSorterIterator sortedRecords =
-      inMemSorter.getSortedIterator();
 
     // Small writes to DiskBlockObjectWriter will be fairly inefficient. Since there doesn't seem to
     // be an API to directly transfer bytes from managed memory to the disk writer, we buffer
@@ -198,6 +215,9 @@ final class ShuffleExternalSorter extends MemoryConsumer {
             spillInfo.partitionLengths[currentPartition] = fileSegment.length();
           }
           currentPartition = partition;
+          if (partitionChecksums.length > 0) {
+            writer.setChecksum(partitionChecksums[currentPartition]);
+          }
         }
 
         final long recordPointer = sortedRecords.packedRecordPointer.getRecordPointer();
@@ -241,9 +261,14 @@ final class ShuffleExternalSorter extends MemoryConsumer {
       //
       // Note that we intentionally ignore the value of `writeMetricsToUse.shuffleWriteTime()`.
       // Consistent with ExternalSorter, we do not count this IO towards shuffle write time.
-      // This means that this IO time is not accounted for anywhere; SPARK-3577 will fix this.
-      writeMetrics.incRecordsWritten(writeMetricsToUse.recordsWritten());
-      taskContext.taskMetrics().incDiskBytesSpilled(writeMetricsToUse.bytesWritten());
+      // SPARK-3577 tracks the spill time separately.
+
+      // This is guaranteed to be a ShuffleWriteMetrics based on the if check in the beginning
+      // of this method.
+      writeMetrics.incRecordsWritten(
+        ((ShuffleWriteMetrics)writeMetricsToUse).recordsWritten());
+      taskContext.taskMetrics().incDiskBytesSpilled(
+        ((ShuffleWriteMetrics)writeMetricsToUse).bytesWritten());
     }
   }
 
@@ -412,7 +437,6 @@ final class ShuffleExternalSorter extends MemoryConsumer {
    *
    * @return metadata for the spill files written by this sorter. If no records were ever inserted
    *         into this sorter, then this will return an empty array.
-   * @throws IOException
    */
   public SpillInfo[] closeAndGetSpills() throws IOException {
     if (inMemSorter != null) {

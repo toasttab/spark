@@ -46,9 +46,10 @@ WHERE  t1a IN (SELECT   min(t2a)
 SELECT t1a 
 FROM   t1
 GROUP  BY 1
-HAVING EXISTS (SELECT 1 
+HAVING EXISTS (SELECT t2a
                FROM  t2
-               WHERE t2a < min(t1a + t2a));
+               GROUP BY 1
+               HAVING t2a < min(t1a + t2a));
 
 -- TC 01.04
 -- Invalid due to mixure of outer and local references under an AggegatedExpression 
@@ -70,3 +71,12 @@ WHERE  t1a IN (SELECT t2a
                WHERE  EXISTS (SELECT min(t2a) 
                               FROM   t3));
 
+CREATE TEMPORARY VIEW t1_copy AS SELECT * FROM VALUES
+  (1, 2, 3)
+AS t1(t1a, t1b, t1c);
+
+-- invalid because column name `t1a` is ambiguous in the subquery.
+SELECT t1.t1a
+FROM   t1
+JOIN   t1_copy
+ON     EXISTS (SELECT 1 FROM t2 WHERE t2a > t1a)

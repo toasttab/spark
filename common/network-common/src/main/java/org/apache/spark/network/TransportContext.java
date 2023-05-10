@@ -17,9 +17,11 @@
 
 package org.apache.spark.network;
 
+import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.codahale.metrics.Counter;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
@@ -42,6 +44,7 @@ import org.apache.spark.network.server.TransportServer;
 import org.apache.spark.network.server.TransportServerBootstrap;
 import org.apache.spark.network.util.IOMode;
 import org.apache.spark.network.util.NettyUtils;
+import org.apache.spark.network.util.NettyLogger;
 import org.apache.spark.network.util.TransportConf;
 import org.apache.spark.network.util.TransportFrameDecoder;
 
@@ -59,13 +62,15 @@ import org.apache.spark.network.util.TransportFrameDecoder;
  * channel. As each TransportChannelHandler contains a TransportClient, this enables server
  * processes to send messages back to the client on an existing channel.
  */
-public class TransportContext {
+public class TransportContext implements Closeable {
   private static final Logger logger = LoggerFactory.getLogger(TransportContext.class);
 
+  private static final NettyLogger nettyLogger = new NettyLogger();
   private final TransportConf conf;
   private final RpcHandler rpcHandler;
   private final boolean closeIdleConnections;
-  private final boolean isClientOnly;
+  // Number of registered connections to the shuffle service
+  private Counter registeredConnections = new Counter();
 
   /**
    * Force to create MessageEncoder and MessageDecoder so that we can make sure they will be created
@@ -85,7 +90,7 @@ public class TransportContext {
   // Separate thread pool for handling ChunkFetchRequest. This helps to enable throttling
   // max number of TransportServer worker threads that are blocked on writing response
   // of ChunkFetchRequest message back to the client via the underlying channel.
-  private static EventLoopGroup chunkFetchWorkers;
+  private final EventLoopGroup chunkFetchWorkers;
 
   public TransportContext(TransportConf conf, RpcHandler rpcHandler) {
     this(conf, rpcHandler, false, false);
@@ -117,18 +122,16 @@ public class TransportContext {
     this.conf = conf;
     this.rpcHandler = rpcHandler;
     this.closeIdleConnections = closeIdleConnections;
-    this.isClientOnly = isClientOnly;
 
-    synchronized(TransportContext.class) {
-      if (chunkFetchWorkers == null &&
-          conf.getModuleName() != null &&
-          conf.getModuleName().equalsIgnoreCase("shuffle") &&
-          !isClientOnly) {
-        chunkFetchWorkers = NettyUtils.createEventLoop(
-            IOMode.valueOf(conf.ioMode()),
-            conf.chunkFetchHandlerThreads(),
-            "shuffle-chunk-fetch-handler");
-      }
+    if (conf.getModuleName() != null &&
+        conf.getModuleName().equalsIgnoreCase("shuffle") &&
+        !isClientOnly && conf.separateChunkFetchRequest()) {
+      chunkFetchWorkers = NettyUtils.createEventLoop(
+          IOMode.valueOf(conf.ioMode()),
+          conf.chunkFetchHandlerThreads(),
+          "shuffle-chunk-fetch-handler");
+    } else {
+      chunkFetchWorkers = null;
     }
   }
 
@@ -186,9 +189,11 @@ public class TransportContext {
       RpcHandler channelRpcHandler) {
     try {
       TransportChannelHandler channelHandler = createChannelHandler(channel, channelRpcHandler);
-      ChunkFetchRequestHandler chunkFetchHandler =
-        createChunkFetchHandler(channelHandler, channelRpcHandler);
-      ChannelPipeline pipeline = channel.pipeline()
+      ChannelPipeline pipeline = channel.pipeline();
+      if (nettyLogger.getLoggingHandler() != null) {
+        pipeline.addLast("loggingHandler", nettyLogger.getLoggingHandler());
+      }
+      pipeline
         .addLast("encoder", ENCODER)
         .addLast(TransportFrameDecoder.HANDLER_NAME, NettyUtils.createFrameDecoder())
         .addLast("decoder", DECODER)
@@ -198,9 +203,10 @@ public class TransportContext {
         // would require more logic to guarantee if this were not part of the same event loop.
         .addLast("handler", channelHandler);
       // Use a separate EventLoopGroup to handle ChunkFetchRequest messages for shuffle rpcs.
-      if (conf.getModuleName() != null &&
-          conf.getModuleName().equalsIgnoreCase("shuffle")
-          && !isClientOnly) {
+      if (chunkFetchWorkers != null) {
+        ChunkFetchRequestHandler chunkFetchHandler = new ChunkFetchRequestHandler(
+          channelHandler.getClient(), rpcHandler.getStreamManager(),
+          conf.maxChunksBeingTransferred(), true /* syncModeEnabled */);
         pipeline.addLast(chunkFetchWorkers, "chunkFetchHandler", chunkFetchHandler);
       }
       return channelHandler;
@@ -218,20 +224,29 @@ public class TransportContext {
   private TransportChannelHandler createChannelHandler(Channel channel, RpcHandler rpcHandler) {
     TransportResponseHandler responseHandler = new TransportResponseHandler(channel);
     TransportClient client = new TransportClient(channel, responseHandler);
+    boolean separateChunkFetchRequest = conf.separateChunkFetchRequest();
+    ChunkFetchRequestHandler chunkFetchRequestHandler = null;
+    if (!separateChunkFetchRequest) {
+      chunkFetchRequestHandler = new ChunkFetchRequestHandler(
+        client, rpcHandler.getStreamManager(),
+        conf.maxChunksBeingTransferred(), false /* syncModeEnabled */);
+    }
     TransportRequestHandler requestHandler = new TransportRequestHandler(channel, client,
-      rpcHandler, conf.maxChunksBeingTransferred());
+      rpcHandler, conf.maxChunksBeingTransferred(), chunkFetchRequestHandler);
     return new TransportChannelHandler(client, responseHandler, requestHandler,
-      conf.connectionTimeoutMs(), closeIdleConnections);
-  }
-
-  /**
-   * Creates the dedicated ChannelHandler for ChunkFetchRequest messages.
-   */
-  private ChunkFetchRequestHandler createChunkFetchHandler(TransportChannelHandler channelHandler,
-      RpcHandler rpcHandler) {
-    return new ChunkFetchRequestHandler(channelHandler.getClient(),
-      rpcHandler.getStreamManager(), conf.maxChunksBeingTransferred());
+      conf.connectionTimeoutMs(), separateChunkFetchRequest, closeIdleConnections, this);
   }
 
   public TransportConf getConf() { return conf; }
+
+  public Counter getRegisteredConnections() {
+    return registeredConnections;
+  }
+
+  @Override
+  public void close() {
+    if (chunkFetchWorkers != null) {
+      chunkFetchWorkers.shutdownGracefully();
+    }
+  }
 }

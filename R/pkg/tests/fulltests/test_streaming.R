@@ -127,9 +127,10 @@ test_that("Specify a schema by using a DDL-formatted string when reading", {
   expect_false(awaitTermination(q, 5 * 1000))
   callJMethod(q@ssq, "processAllAvailable")
   expect_equal(head(sql("SELECT count(*) FROM people3"))[[1]], 3)
+  stopQuery(q)
 
   expect_error(read.stream(path = parquetPath, schema = "name stri"),
-               "DataType stri is not supported.")
+               ".*Unsupported data type \"STRI\".*")
 
   unlink(parquetPath)
 })
@@ -139,8 +140,7 @@ test_that("Non-streaming DataFrame", {
   expect_false(isStreaming(c))
 
   expect_error(write.stream(c, "memory", queryName = "people", outputMode = "complete"),
-               paste0(".*(writeStream : analysis error - 'writeStream' can be called only on ",
-                      "streaming Dataset/DataFrame).*"))
+               paste0("Error in writeStream : analysis error - \\[WRITE_STREAM_NOT_ALLOWED\\].*"))
 })
 
 test_that("Unsupported operation", {
